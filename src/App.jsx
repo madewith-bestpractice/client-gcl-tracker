@@ -26,8 +26,24 @@ import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import JSZip from 'jszip';
 
 import {
-  Gem, Sparkles, Package, Truck, Box, Camera, CheckCircle, Heart, DollarSign,
-  Clipboard, ShieldCheck, ShieldX, RefreshCw, LogOut, Search, Copy, Download, Eye
+  Gem,
+  Sparkles,
+  Package,
+  Truck,
+  Box,
+  Camera,
+  CheckCircle,
+  Heart,
+  DollarSign,
+  Clipboard,
+  ShieldCheck,
+  ShieldX,
+  RefreshCw,
+  LogOut,
+  Search,
+  Copy,
+  Download,
+  Eye
 } from 'lucide-react';
 
 /* ---------------- Firebase bootstrap ---------------- */
@@ -85,7 +101,15 @@ const genToken = (bytes = 24) => {
 };
 
 const nowISO = () => new Date().toISOString();
+
 const toMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis() : 0;
+
+const safeFilename = (s) =>
+  String(s || '')
+    .trim()
+    .replace(/[^a-z0-9._-]+/gi, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'file';
 
 const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => new Promise((resolve, reject) => {
   const img = new Image();
@@ -109,12 +133,57 @@ const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => new Promise
   reader.readAsDataURL(file);
 });
 
-const safeFilename = (s) =>
+/* ---------------- Tracking (Option A) helpers ---------------- */
+
+const normalizeTracking = (s) =>
   String(s || '')
     .trim()
-    .replace(/[^a-z0-9._-]+/gi, '_')
-    .replace(/_+/g, '_')
-    .replace(/^_+|_+$/g, '') || 'file';
+    .replace(/\s+/g, '')
+    .replace(/[^a-z0-9]/gi, '')
+    .toUpperCase();
+
+const detectCarrier = (raw) => {
+  const t = normalizeTracking(raw);
+  if (!t) return { key: 'unknown', label: 'Carrier', confidence: 0 };
+
+  // UPS: 1Z + 16 chars
+  if (/^1Z[0-9A-Z]{16}$/.test(t)) return { key: 'ups', label: 'UPS', confidence: 0.95 };
+
+  // USPS: often 20–22 digits and commonly starts with 9
+  if (/^9\d{19,21}$/.test(t) || /^\d{20,22}$/.test(t)) return { key: 'usps', label: 'USPS', confidence: 0.75 };
+
+  // FedEx: common lengths 12/15/20/22 digits (heuristic)
+  if (/^\d{12}$/.test(t) || /^\d{15}$/.test(t) || /^\d{20}$/.test(t) || /^\d{22}$/.test(t)) {
+    return { key: 'fedex', label: 'FedEx', confidence: 0.7 };
+  }
+
+  // DHL (heuristic)
+  if (/^\d{10}$/.test(t) || /^JD\d{16,18}$/.test(t)) return { key: 'dhl', label: 'DHL', confidence: 0.6 };
+
+  return { key: 'unknown', label: 'Carrier', confidence: 0.2 };
+};
+
+const carrierTrackingUrl = (raw) => {
+  const t = normalizeTracking(raw);
+  const c = detectCarrier(t);
+  if (!t) return null;
+
+  switch (c.key) {
+    case 'ups':
+      return `https://www.ups.com/track?loc=en_US&tracknum=${encodeURIComponent(t)}`;
+    case 'usps':
+      return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(t)}`;
+    case 'fedex':
+      return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(t)}`;
+    case 'dhl':
+      return `https://www.dhl.com/global-en/home/tracking.html?tracking-id=${encodeURIComponent(t)}`;
+    default:
+      return `https://www.google.com/search?q=${encodeURIComponent(t + ' tracking')}`;
+  }
+};
+
+const trackingHint = () =>
+  "Tracking links may take a few hours to activate. The first scan often appears after pickup.";
 
 /* ---------------- UI bits ---------------- */
 
@@ -149,10 +218,10 @@ const Button = ({ variant = 'primary', className = '', ...props }) => {
   const styles = variant === 'primary'
     ? "bg-rose-600 text-white hover:bg-rose-700"
     : variant === 'dark'
-    ? "bg-slate-900 text-white hover:bg-slate-800"
-    : variant === 'ghost'
-    ? "bg-transparent text-slate-700 hover:bg-slate-100"
-    : "bg-slate-100 text-slate-800 hover:bg-slate-200";
+      ? "bg-slate-900 text-white hover:bg-slate-800"
+      : variant === 'ghost'
+        ? "bg-transparent text-slate-700 hover:bg-slate-100"
+        : "bg-slate-100 text-slate-800 hover:bg-slate-200";
   return <button {...props} className={`${base} ${styles} ${className}`} />;
 };
 
@@ -161,8 +230,10 @@ const ProgressBar = ({ currentStatus }) => {
   const pct = Math.max(5, ((i + 1) / STATUS_FLOW.length) * 100);
   return (
     <div className="w-full bg-rose-100 h-2 rounded-full overflow-hidden mt-2">
-      <div className="bg-gradient-to-r from-rose-400 to-purple-500 h-full transition-all duration-500 ease-out"
-        style={{ width: `${pct}%` }} />
+      <div
+        className="bg-gradient-to-r from-rose-400 to-purple-500 h-full transition-all duration-500 ease-out"
+        style={{ width: `${pct}%` }}
+      />
     </div>
   );
 };
@@ -175,9 +246,14 @@ const Timeline = ({ status }) => {
         const Icon = s.icon;
         const done = idx <= cur;
         return (
-          <div key={s.id} className={`rounded-2xl border p-4 ${done ? 'border-rose-200 bg-rose-50' : 'border-slate-100 bg-white'}`}>
+          <div
+            key={s.id}
+            className={`rounded-2xl border p-4 ${done ? 'border-rose-200 bg-rose-50' : 'border-slate-100 bg-white'}`}
+          >
             <div className="flex items-start gap-3">
-              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${done ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+              <div
+                className={`w-10 h-10 rounded-2xl flex items-center justify-center ${done ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'}`}
+              >
                 <Icon className="w-5 h-5" />
               </div>
               <div>
@@ -188,6 +264,50 @@ const Timeline = ({ status }) => {
           </div>
         );
       })}
+    </div>
+  );
+};
+
+const ShipmentCard = ({ label, trackingNumber, onCopy }) => {
+  const t = normalizeTracking(trackingNumber);
+  const carrier = detectCarrier(t);
+  const url = carrierTrackingUrl(t);
+
+  if (!t) {
+    return (
+      <div className="rounded-2xl border border-slate-100 bg-white p-4">
+        <div className="text-sm font-semibold text-slate-800">{label}</div>
+        <div className="text-sm text-slate-500 mt-1">No tracking number yet.</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-slate-100 bg-white p-4">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-slate-800">{label}</div>
+
+          <div className="mt-2 flex items-center gap-2 flex-wrap">
+            <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-semibold text-slate-700">
+              {carrier.label}
+            </span>
+            <span className="text-xs text-slate-500 break-all">{t}</span>
+          </div>
+
+          <div className="text-xs text-slate-500 mt-2">{trackingHint()}</div>
+        </div>
+
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="secondary" onClick={() => onCopy?.(t)} title="Copy tracking number">
+            <span className="inline-flex items-center gap-2"><Copy className="w-4 h-4" />Copy</span>
+          </Button>
+
+          <a href={url} target="_blank" rel="noreferrer">
+            <Button title="Open carrier tracking page">Track</Button>
+          </a>
+        </div>
+      </div>
     </div>
   );
 };
@@ -544,9 +664,9 @@ export default function App() {
   const saveTracking = async () => {
     requireAdmin();
     const tracking = {
-      kitOutbound: trackingDraft.kitOutbound || null,
-      kitReturn: trackingDraft.kitReturn || null,
-      productOutbound: trackingDraft.productOutbound || null
+      kitOutbound: normalizeTracking(trackingDraft.kitOutbound) || null,
+      kitReturn: normalizeTracking(trackingDraft.kitReturn) || null,
+      productOutbound: normalizeTracking(trackingDraft.productOutbound) || null
     };
 
     await updateDoc(doc(db, 'publicTracking', token), {
@@ -723,12 +843,11 @@ export default function App() {
     setExportProgress({ step: 'Fetching orders…', done: 0, total: 0 });
 
     try {
-      // Pull a generous batch; keep it simple for now.
       const q = query(collection(db, 'publicTracking'), orderBy('updatedAt', 'desc'), limit(1000));
       const snaps = await getDocs(q);
       const orders = snaps.docs.map(d => ({ token: d.id, ...d.data() }));
 
-      // Build CSV
+      // CSV
       const headers = [
         'token', 'orderId', 'customerName', 'customerEmail', 'status',
         'createdAt', 'updatedAt',
@@ -785,7 +904,7 @@ export default function App() {
 
       const csv = [headers.join(','), ...rows].join('\n');
 
-      // ZIP it all
+      // ZIP
       const zip = new JSZip();
       zip.file('orders.csv', csv);
       zip.file('orders.json', JSON.stringify(orders, null, 2));
@@ -797,7 +916,6 @@ export default function App() {
           if (p?.url) {
             allPhotos.push({
               token: o.token,
-              orderId: o.orderId || '',
               idx,
               url: p.url,
               uploadedAt: p.uploadedAt || '',
@@ -809,7 +927,6 @@ export default function App() {
 
       setExportProgress({ step: 'Downloading images…', done: 0, total: allPhotos.length });
 
-      // Fetch + add images sequentially (more reliable than huge parallel)
       for (let i = 0; i < allPhotos.length; i++) {
         const item = allPhotos[i];
         setExportProgress({ step: 'Downloading images…', done: i, total: allPhotos.length });
@@ -819,13 +936,11 @@ export default function App() {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const blob = await res.blob();
 
-          // file name
           const base = `${item.idx + 1}_${safeFilename(item.reviewStatus)}_${safeFilename(item.uploadedAt || '')}.jpg`;
           const path = `images/${safeFilename(item.token)}/${base}`;
 
           zip.file(path, blob);
         } catch {
-          // if an image fails, keep export going
           const path = `images/${safeFilename(item.token)}/FAILED_${item.idx + 1}.txt`;
           zip.file(path, `Failed to download: ${item.url}`);
         }
@@ -1140,6 +1255,62 @@ export default function App() {
                       </div>
                     </Card>
 
+                    {/* Shipments (Option A) */}
+                    <Card>
+                      <h2 className="text-xl font-semibold text-slate-800">Shipments</h2>
+                      <p className="text-slate-600 mt-1">
+                        Use the links below to view the latest carrier scans.
+                      </p>
+
+                      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <ShipmentCard
+                          label="Kit outbound"
+                          trackingNumber={trackDoc?.tracking?.kitOutbound}
+                          onCopy={copyText}
+                        />
+                        <ShipmentCard
+                          label="Mold return"
+                          trackingNumber={trackDoc?.tracking?.kitReturn}
+                          onCopy={copyText}
+                        />
+                        <ShipmentCard
+                          label="Product outbound"
+                          trackingNumber={trackDoc?.tracking?.productOutbound}
+                          onCopy={copyText}
+                        />
+                      </div>
+
+                      <div className="mt-4 text-sm text-slate-600">
+                        {(() => {
+                          const st = trackDoc?.status || 'created';
+                          const kit = normalizeTracking(trackDoc?.tracking?.kitOutbound);
+                          const prod = normalizeTracking(trackDoc?.tracking?.productOutbound);
+
+                          if (['kit_shipped', 'kit_delivered'].includes(st) && !kit) {
+                            return (
+                              <>
+                                <span className="text-rose-700 font-semibold">Vendor note:</span>{' '}
+                                Kit is marked shipped, but no tracking number is set yet.
+                              </>
+                            );
+                          }
+                          if (['product_shipped', 'product_delivered'].includes(st) && !prod) {
+                            return (
+                              <>
+                                <span className="text-rose-700 font-semibold">Vendor note:</span>{' '}
+                                Product is marked shipped, but no tracking number is set yet.
+                              </>
+                            );
+                          }
+                          return (
+                            <span className="text-slate-500">
+                              Tip: if tracking isn’t showing scans yet, check again later—carriers often delay the first update.
+                            </span>
+                          );
+                        })()}
+                      </div>
+                    </Card>
+
                     {/* Vendor operations */}
                     {isAdmin && (
                       <Card>
@@ -1172,6 +1343,13 @@ export default function App() {
                             <label className="text-sm font-medium text-slate-700">Product outbound tracking #</label>
                             <Input value={trackingDraft.productOutbound} onChange={(e) => setTrackingDraft({ ...trackingDraft, productOutbound: e.target.value })} />
                           </div>
+                        </div>
+
+                        {/* Live preview shipment cards while editing */}
+                        <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <ShipmentCard label="Kit outbound (preview)" trackingNumber={trackingDraft.kitOutbound} onCopy={copyText} />
+                          <ShipmentCard label="Mold return (preview)" trackingNumber={trackingDraft.kitReturn} onCopy={copyText} />
+                          <ShipmentCard label="Product outbound (preview)" trackingNumber={trackingDraft.productOutbound} onCopy={copyText} />
                         </div>
 
                         <div className="mt-4 flex items-center justify-between flex-wrap gap-3">
@@ -1242,8 +1420,8 @@ export default function App() {
                           const review = p.review || { status: 'pending', note: '', reviewedAt: null };
                           const badge =
                             review.status === 'approved' ? 'bg-emerald-50 border-emerald-200 text-emerald-800' :
-                            review.status === 'rejected' ? 'bg-rose-50 border-rose-200 text-rose-800' :
-                            'bg-slate-50 border-slate-200 text-slate-700';
+                              review.status === 'rejected' ? 'bg-rose-50 border-rose-200 text-rose-800' :
+                                'bg-slate-50 border-slate-200 text-slate-700';
 
                           return (
                             <div key={idx} className="rounded-2xl border border-slate-100 p-4">
