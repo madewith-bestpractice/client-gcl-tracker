@@ -1,0 +1,102 @@
+Step-by-step: deploy this as production (Cloudflare Pages + Firebase)
+1) Firebase setup (free Spark plan)
+
+Create Firebase project.
+
+Enable Authentication:
+
+Anonymous
+
+Email/Password
+
+Create Firestore (production mode).
+
+Create Storage.
+
+Add a Web app in Firebase console → copy the config values.
+
+Firestore free tier quotas are documented (50K reads/day, 20K writes/day, etc.).
+
+2) Add vendor admin allowlist
+
+Firestore → create collection admins
+
+Document ID = your vendor user’s UID
+
+(Document can be empty)
+
+3) Add rules
+
+Paste Firestore rules above in Firestore → Rules
+
+Paste Storage rules above in Storage → Rules
+
+4) Cloudflare Pages deploy
+
+Push repo to GitHub.
+
+Cloudflare → Pages → “Import existing repository”.
+
+Build settings:
+
+Build command: npm run build
+
+Output directory: dist
+
+Add env vars (Pages → Settings → Environment variables):
+
+VITE_FIREBASE_API_KEY
+
+VITE_FIREBASE_AUTH_DOMAIN
+
+VITE_FIREBASE_PROJECT_ID
+
+VITE_FIREBASE_STORAGE_BUCKET
+
+VITE_FIREBASE_MESSAGING_SENDER_ID
+
+VITE_FIREBASE_APP_ID
+
+Deploy.
+
+5) How it works in production
+
+Vendor logs in → creates order → app generates token and shows share link
+
+Customer opens link /?t=... on any device → sees status, messages, uploads photos
+
+Vendor opens same link → sees everything + review controls + status transitions
+
+Answering your specific questions clearly
+1) “Can we implement a server generated link token model?”
+
+Yes, but the truly server-generated version usually means Blaze (Firebase Functions) .
+What I implemented is the fastest + free equivalent: a cryptographically strong token generated during order creation and stored server-side (Firestore). It behaves like a server token in practice.
+
+5) “Will the token model address cross-device?”
+
+Yes. This design is link-based and not tied to anonymous auth, so it works across devices.
+
+B) “Per-visit limit on checks”
+
+Implemented via:
+
+polling (instead of realtime)
+
+sessionStorage counter + stop + message
+
+C) “Vendor viewing + approving with notes is critical”
+
+Implemented.
+
+Optional: If you truly want “server-generated tokens” later
+
+Two paths:
+
+Firebase Cloud Functions: easiest dev experience, but likely requires Blaze
+
+Cloudflare Worker: can generate token + write Firestore via REST (more setup)
+
+If you want that, say “Worker” or “Functions” and I’ll give you the exact implementation.
+
+If you paste your current package.json and confirm whether you already have Tailwind working in your build (you likely do), I can also tell you if any dependency/version mismatches will break Cloudflare’s build.

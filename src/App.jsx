@@ -1,35 +1,36 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
-  onAuthStateChanged,
   signInAnonymously,
+  onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut
 } from 'firebase/auth';
 import {
   getFirestore,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  addDoc,
   collection,
+  doc,
+  updateDoc,
+  onSnapshot,
   query,
+  addDoc,
+  arrayUnion,
   where,
-  getDocs,
+  limit,
   serverTimestamp
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 import {
   Gem, Sparkles, Package, Truck, Box, Camera, CheckCircle, Heart, DollarSign,
-  Clipboard, ShieldCheck, ShieldX, RefreshCw, LogOut
+  Clipboard, Copy
 } from 'lucide-react';
 
-/* ---------------- Firebase bootstrap ---------------- */
+/* ---------------- Firebase Config ---------------- */
 
 const getFirebaseConfig = () => {
+  // Prefer build-time env vars for production (Cloudflare Pages)
   const cfg = {
     apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
     authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
@@ -38,347 +39,182 @@ const getFirebaseConfig = () => {
     messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
     appId: import.meta.env.VITE_FIREBASE_APP_ID
   };
+
+  // (Optional) Firebase Hosting preview environments inject __firebase_config
+  if (!cfg.apiKey && typeof __firebase_config !== 'undefined') {
+    try { return JSON.parse(__firebase_config); } catch { /* ignore */ }
+  }
+
   return cfg.apiKey ? cfg : null;
 };
 
 const firebaseConfig = getFirebaseConfig();
-const app = firebaseConfig ? initializeApp(firebaseConfig) : undefined;
+const app = firebaseConfig && firebaseConfig.apiKey ? initializeApp(firebaseConfig) : undefined;
 const auth = app ? getAuth(app) : undefined;
 const db = app ? getFirestore(app) : undefined;
 const storage = app ? getStorage(app) : undefined;
 
-/* ---------------- Workflow ---------------- */
+/* ---------------- Workflow + helpers ---------------- */
 
 const STATUS_FLOW = [
   { id: 'created', label: 'Created', icon: Sparkles, description: 'Order created' },
   { id: 'address_captured', label: 'Address', icon: Clipboard, description: 'Shipping address confirmed' },
-  { id: 'kit_shipped', label: 'Kit shipped', icon: Package, description: 'Kit is on the way' },
-  { id: 'kit_delivered', label: 'Kit delivered', icon: Box, description: 'Customer has kit' },
-  { id: 'photos_submitted', label: 'Photos submitted', icon: Camera, description: 'Photos received for review' },
-  { id: 'photos_reviewed', label: 'Photos reviewed', icon: CheckCircle, description: 'Approved or needs changes' },
-  { id: 'mold_in_transit', label: 'Mold return', icon: Truck, description: 'Mold heading back' },
-  { id: 'mold_received', label: 'Mold received', icon: Box, description: 'Mold arrived' },
-  { id: 'production', label: 'Making magic', icon: Gem, description: 'Creating your piece' },
-  { id: 'product_shipped', label: 'Shipped', icon: Package, description: 'Final product on the way' },
-  { id: 'product_delivered', label: 'Delivered', icon: Heart, description: 'Delivered to you' },
-  { id: 'paid_complete', label: 'Complete', icon: DollarSign, description: 'All set' },
+  { id: 'kit_shipped', label: 'Kit Shipped', icon: Package, description: 'Kit is on the way' },
+  { id: 'kit_delivered', label: 'Kit Delivered', icon: Box, description: 'Customer has kit' },
+  { id: 'photos_submitted', label: 'Reviewing', icon: Camera, description: 'Checking mold photos' },
+  { id: 'photos_approved', label: 'Approved', icon: CheckCircle, description: 'Send mold back' },
+  { id: 'mold_in_transit', label: 'Mold Return', icon: Truck, description: 'Mold on the way back' },
+  { id: 'mold_received', label: 'Mold Received', icon: Box, description: 'We have your mold' },
+  { id: 'production', label: 'Making Magic', icon: Gem, description: 'Creating your piece' },
+  { id: 'product_shipped', label: 'Shipped', icon: Package, description: 'It\'s on the way!' },
+  { id: 'product_delivered', label: 'Delivered', icon: Heart, description: 'You got it!' },
+  { id: 'paid_complete', label: 'All Done', icon: DollarSign, description: 'Order Complete' },
 ];
 
-const statusIndex = (s) => Math.max(0, STATUS_FLOW.findIndex(x => x.id === s));
-
-/* ---------------- Utilities ---------------- */
-
-const qs = () => new URLSearchParams(window.location.search);
-const getTokenFromURL = () => qs().get('t')?.trim() || '';
-
-const genToken = (bytes = 24) => {
-  const a = new Uint8Array(bytes);
-  crypto.getRandomValues(a);
-  // url-safe base64-ish
-  return btoa(String.fromCharCode(...a)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+const generateClaimCode = (len = 8) => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = new Uint8Array(len);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
 };
 
-const nowISO = () => new Date().toISOString();
+const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => {
+  // Resize + JPEG compress client-side to keep uploads cheap/fast.
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
 
-const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => new Promise((resolve, reject) => {
-  const img = new Image();
-  const reader = new FileReader();
-  reader.onload = (e) => { img.src = e.target.result; };
-  reader.onerror = reject;
-  img.onload = () => {
-    const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-    const w = Math.round(img.width * scale);
-    const h = Math.round(img.height * scale);
-    const canvas = document.createElement('canvas');
-    canvas.width = w; canvas.height = h;
-    canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-    canvas.toBlob((blob) => blob ? resolve({ blob, width: w, height: h }) : reject(new Error('Compression failed')),
-      'image/jpeg', quality);
-  };
-  img.onerror = reject;
-  reader.readAsDataURL(file);
-});
+    reader.onload = (e) => { img.src = e.target.result; };
+    reader.onerror = reject;
 
-/* ---------------- UI bits ---------------- */
+    img.onload = () => {
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
 
-const Card = ({ children }) => (
-  <div className="bg-white border border-slate-100 rounded-3xl p-6 shadow-sm">{children}</div>
-);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
 
-const Input = (props) => (
-  <input
-    {...props}
-    className={[
-      "w-full rounded-xl border border-slate-200 px-3 py-2",
-      "focus:outline-none focus:ring-2 focus:ring-rose-200",
-      props.className || ""
-    ].join(" ")}
-  />
-);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
 
-const Textarea = (props) => (
-  <textarea
-    {...props}
-    className={[
-      "w-full rounded-xl border border-slate-200 px-3 py-2",
-      "focus:outline-none focus:ring-2 focus:ring-rose-200",
-      props.className || ""
-    ].join(" ")}
-  />
-);
+      canvas.toBlob(
+        (blob) => blob ? resolve({ blob, width: w, height: h }) : reject(new Error('Image compression failed')),
+        'image/jpeg',
+        quality
+      );
+    };
 
-const Button = ({ variant = 'primary', className = '', ...props }) => {
-  const base = "rounded-xl px-4 py-2 font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed";
-  const styles = variant === 'primary'
-    ? "bg-rose-600 text-white hover:bg-rose-700"
-    : variant === 'dark'
-    ? "bg-slate-900 text-white hover:bg-slate-800"
-    : variant === 'ghost'
-    ? "bg-transparent text-slate-700 hover:bg-slate-100"
-    : "bg-slate-100 text-slate-800 hover:bg-slate-200";
-  return <button {...props} className={`${base} ${styles} ${className}`} />;
+    img.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 };
 
 const ProgressBar = ({ currentStatus }) => {
-  const i = statusIndex(currentStatus);
-  const pct = Math.max(5, ((i + 1) / STATUS_FLOW.length) * 100);
+  const currentIndex = STATUS_FLOW.findIndex(s => s.id === currentStatus);
+  const percentage = Math.max(5, ((currentIndex + 1) / STATUS_FLOW.length) * 100);
   return (
     <div className="w-full bg-rose-100 h-2 rounded-full overflow-hidden mt-2">
       <div className="bg-gradient-to-r from-rose-400 to-purple-500 h-full transition-all duration-500 ease-out"
-        style={{ width: `${pct}%` }} />
+           style={{ width: `${percentage}%` }} />
     </div>
   );
 };
-
-const Timeline = ({ status }) => {
-  const cur = statusIndex(status);
-  return (
-    <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-      {STATUS_FLOW.map((s, idx) => {
-        const Icon = s.icon;
-        const done = idx <= cur;
-        return (
-          <div key={s.id} className={`rounded-2xl border p-4 ${done ? 'border-rose-200 bg-rose-50' : 'border-slate-100 bg-white'}`}>
-            <div className="flex items-start gap-3">
-              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center ${done ? 'bg-rose-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
-                <Icon className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="font-semibold text-slate-800">{s.label}</div>
-                <div className="text-sm text-slate-600">{s.description}</div>
-              </div>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-};
-
-/* ---------------- App ---------------- */
 
 export default function App() {
-  // Config missing
-  if (!app || !auth || !db || !storage) {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const [activeRole, setActiveRole] = useState('customer');
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const [adminEmail, setAdminEmail] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+
+  const [orders, setOrders] = useState([]);
+  const [activeOrder, setActiveOrder] = useState(null);
+  const [view, setView] = useState('dashboard');
+
+  const [clientForm, setClientForm] = useState({ name: '', email: '' });
+  const [claimForm, setClaimForm] = useState({ orderId: '', code: '' });
+  const [newMessage, setNewMessage] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
+
+  // If config missing, show a friendly setup screen
+  if (!app || !auth || !db) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
         <div className="max-w-xl w-full bg-white border border-slate-200 rounded-3xl p-8">
           <h1 className="text-2xl font-semibold text-slate-800">Deployment Configuration Needed</h1>
           <p className="text-slate-600 mt-2">
-            Set Cloudflare Pages env vars: <code>VITE_FIREBASE_API_KEY</code>, <code>VITE_FIREBASE_AUTH_DOMAIN</code>, etc.
+            Set Cloudflare Pages build environment variables:
+            <code className="ml-2 text-sm">VITE_FIREBASE_API_KEY</code>, <code className="text-sm">VITE_FIREBASE_AUTH_DOMAIN</code>, etc.
           </p>
         </div>
       </div>
     );
   }
 
-  // auth + role
-  const [user, setUser] = useState(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-
-  // role UI
-  const [activeRole, setActiveRole] = useState('customer'); // customer | vendor
-
-  // vendor login
-  const [adminEmail, setAdminEmail] = useState('');
-  const [adminPassword, setAdminPassword] = useState('');
-  const [authError, setAuthError] = useState('');
-
-  // token tracking
-  const [token, setToken] = useState(getTokenFromURL());
-  const [trackDoc, setTrackDoc] = useState(null); // {orderId, ...public view}
-  const [orderDoc, setOrderDoc] = useState(null); // admin only full order
-  const [loading, setLoading] = useState(true);
-
-  // vendor: create
-  const [clientForm, setClientForm] = useState({ name: '', email: '' });
-
-  // shared actions
-  const [messageText, setMessageText] = useState('');
-  const [photoNoteDraft, setPhotoNoteDraft] = useState({}); // per-photo vendor note drafts
-  const [uploading, setUploading] = useState(false);
-
-  // operational fields (editable)
-  const [addressDraft, setAddressDraft] = useState({
-    line1: '', line2: '', city: '', state: '', zip: '', country: 'US'
-  });
-  const [trackingDraft, setTrackingDraft] = useState({
-    kitOutbound: '', kitReturn: '', productOutbound: ''
-  });
-  const [paidDraft, setPaidDraft] = useState(false);
-
-  /* ---------- Polling limits (per visit) ---------- */
-  const LIMITS = useMemo(() => ({
-    customer: { maxChecks: 240, intervalMs: 15000 }, // 1 hour @ 15s
-    vendor: { maxChecks: 720, intervalMs: 5000 },   // 1 hour @ 5s
-  }), []);
-
-  const checksKey = activeRole === 'vendor' ? 'checks_vendor' : 'checks_customer';
-  const [checksUsed, setChecksUsed] = useState(() => Number(sessionStorage.getItem(checksKey) || 0));
-  const [checksLimitHit, setChecksLimitHit] = useState(false);
-
-  const bumpCheck = () => {
-    const next = (Number(sessionStorage.getItem(checksKey) || 0) + 1);
-    sessionStorage.setItem(checksKey, String(next));
-    setChecksUsed(next);
-    const lim = activeRole === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-    if (next >= lim) setChecksLimitHit(true);
-    return next;
-  };
-
-  /* ---------- Auth bootstrap ---------- */
+  // Auth bootstrap (anonymous by default)
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
       if (u) {
         setUser(u);
-        // check admin allowlist
-        try {
-          const adminSnap = await getDoc(doc(db, 'admins', u.uid));
-          setIsAdmin(adminSnap.exists());
-        } catch {
-          setIsAdmin(false);
-        }
         setLoading(false);
       } else {
-        await signInAnonymously(auth);
+        signInAnonymously(auth).catch((error) => console.error("Auth Error:", error));
       }
     });
+    return () => unsubscribe();
+  }, []);
+
+  // Admin allowlist: /admins/{uid}
+  useEffect(() => {
+    if (!user || !db) return;
+    const unsub = onSnapshot(doc(db, 'admins', user.uid), (snap) => {
+      setIsAdmin(snap.exists());
+    });
     return () => unsub();
-  }, []);
+  }, [user?.uid]);
 
-  /* ---------- URL token watcher ---------- */
+  // Orders listener:
+  // - admins: see all
+  // - customers: only orders they own
   useEffect(() => {
-    const onPop = () => setToken(getTokenFromURL());
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, []);
+    if (!user || !db) return;
 
-  const setURLToken = (t) => {
-    const u = new URL(window.location.href);
-    if (t) u.searchParams.set('t', t);
-    else u.searchParams.delete('t');
-    window.history.pushState({}, '', u.toString());
-    setToken(t);
-  };
+    const q = isAdmin
+      ? query(collection(db, 'orders'), limit(200))
+      : query(collection(db, 'orders'), where('ownerUid', '==', user.uid), limit(200));
 
-  /* ---------- Data fetchers ---------- */
-  const fetchByToken = async (t) => {
-    if (!t) return { track: null, order: null };
-    bumpCheck();
-    const trackRef = doc(db, 'publicTracking', t);
-    const trackSnap = await getDoc(trackRef);
-    if (!trackSnap.exists()) return { track: null, order: null };
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const fetched = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      const toMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis() : (typeof v === 'string' ? Date.parse(v) : 0);
+      fetched.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+      setOrders(fetched);
 
-    const track = { id: trackSnap.id, ...trackSnap.data() };
-
-    // Admins can fetch full order too
-    let order = null;
-    if (isAdmin && track.orderId) {
-      const orderSnap = await getDoc(doc(db, 'orders', track.orderId));
-      if (orderSnap.exists()) order = { id: orderSnap.id, ...orderSnap.data() };
-    }
-
-    return { track, order };
-  };
-
-  const fetchVendorOrdersIndex = async () => {
-    // Small vendor list (most recent 100) from orders collection
-    bumpCheck();
-    const q = query(collection(db, 'orders'), where('archived', '!=', true));
-    const snaps = await getDocs(q);
-    const items = snaps.docs.map(d => ({ id: d.id, ...d.data() }));
-    // naive sort by createdAt (serverTimestamp may be null on first paint)
-    const toMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis() : 0;
-    items.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
-    return items.slice(0, 200);
-  };
-
-  /* ---------- Polling loop ---------- */
-  const pollRef = useRef(null);
-  useEffect(() => {
-    // stop polling if limit hit
-    if (checksLimitHit) return;
-
-    const { intervalMs } = activeRole === 'vendor' ? LIMITS.vendor : LIMITS.customer;
-
-    const tick = async () => {
-      try {
-        if (!token) {
-          // no token: vendor may still want dashboard; customer will just sit.
-          return;
-        }
-        const { track, order } = await fetchByToken(token);
-        setTrackDoc(track);
-        setOrderDoc(order);
-      } catch (e) {
-        console.error(e);
+      if (activeOrder) {
+        const updated = fetched.find(o => o.id === activeOrder.id);
+        if (updated) setActiveOrder(updated);
       }
-    };
+    });
 
-    // first load
-    tick();
+    return () => unsubscribe();
+  }, [user, isAdmin, activeOrder?.id]);
 
-    pollRef.current = setInterval(() => {
-      // hard-stop if limit hit
-      if (checksLimitHit) return;
-      const lim = activeRole === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-      const used = Number(sessionStorage.getItem(checksKey) || 0);
-      if (used >= lim) {
-        setChecksLimitHit(true);
-        return;
-      }
-      tick();
-    }, intervalMs);
-
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, activeRole, isAdmin, checksLimitHit]);
-
-  /* ---------- Manual refresh button ---------- */
-  const manualRefresh = async () => {
-    if (checksLimitHit) return;
-    if (!token) return;
-    const lim = activeRole === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-    const used = Number(sessionStorage.getItem(checksKey) || 0);
-    if (used >= lim) { setChecksLimitHit(true); return; }
-
-    const { track, order } = await fetchByToken(token);
-    setTrackDoc(track);
-    setOrderDoc(order);
-  };
-
-  /* ---------- Vendor auth actions ---------- */
   const adminLogin = async () => {
+    if (!auth || !adminEmail || !adminPassword) return;
     setAuthError('');
     try {
-      if (auth.currentUser?.isAnonymous) await signOut(auth);
+      if (auth.currentUser?.isAnonymous) {
+        await signOut(auth);
+      }
       await signInWithEmailAndPassword(auth, adminEmail.trim(), adminPassword);
       setAdminPassword('');
-      // role re-check happens onAuthStateChanged
     } catch (e) {
+      console.error(e);
       setAuthError(e?.message || 'Login failed');
     }
   };
@@ -387,236 +223,116 @@ export default function App() {
     await signOut(auth);
     setUser(null);
     setIsAdmin(false);
-    setTrackDoc(null);
-    setOrderDoc(null);
-    setURLToken('');
+    setView('dashboard');
   };
 
-  /* ---------- Vendor: Create order + token + public tracking doc ---------- */
-  const createOrder = async () => {
-    if (!isAdmin) return;
-    if (!clientForm.name.trim()) return;
-
-    const t = genToken(24);
-    const orderData = {
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-      customerName: clientForm.name.trim(),
-      customerEmail: clientForm.email.trim() || null,
-      status: 'created',
-
-      address: null,
-      tracking: { kitOutbound: null, kitReturn: null, productOutbound: null },
-      paid: false,
-
-      // Photos stored as objects; urls point to Storage
-      photos: [], // {url, storagePath, uploadedAt, uploadedBy, review: {status:'pending'|'approved'|'rejected', note, reviewedAt}}
-      messages: [], // {sender, text, at}
-
-      trackToken: t,
-      archived: false
-    };
-
-    const orderRef = await addDoc(collection(db, 'orders'), orderData);
-
-    // Public tracking view: safe subset
-    const publicRef = doc(db, 'publicTracking', t);
-    await setDoc(publicRef, {
-      orderId: orderRef.id,
-      customerName: orderData.customerName,
-      status: orderData.status,
-      updatedAt: serverTimestamp(),
-
-      address: null,
-      tracking: orderData.tracking,
-      paid: orderData.paid,
-
-      photos: [],     // subset of photos with review info
-      messages: [],   // subset of messages
-    });
-
-    setClientForm({ name: '', email: '' });
-    setURLToken(t);
-    // immediate load
-    const { track, order } = await fetchByToken(t);
-    setTrackDoc(track);
-    setOrderDoc(order);
-  };
-
-  /* ---------- Sync helpers: write both order + public tracking ---------- */
-  const requireAdmin = () => {
-    if (!isAdmin) throw new Error('Admin only');
-    if (!trackDoc?.orderId) throw new Error('No order bound');
-  };
-
-  const updateStatus = async (nextStatus) => {
-    requireAdmin();
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      status: nextStatus,
-      updatedAt: serverTimestamp()
-    });
-    await updateDoc(doc(db, 'publicTracking', token), {
-      status: nextStatus,
-      updatedAt: serverTimestamp()
-    });
-    await manualRefresh();
-  };
-
-  const saveAddress = async () => {
-    // Customers can submit address via token (public doc) — vendor still sees it.
-    if (!trackDoc?.orderId) return;
-    const address = { ...addressDraft };
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      address,
-      status: Math.max(statusIndex(orderDoc?.status || trackDoc.status), statusIndex('address_captured')) >= statusIndex('address_captured')
-        ? (orderDoc?.status || trackDoc.status)
-        : 'address_captured',
-      updatedAt: serverTimestamp()
-    });
-    await updateDoc(doc(db, 'publicTracking', token), {
-      address,
-      status: 'address_captured',
-      updatedAt: serverTimestamp()
-    });
-    await manualRefresh();
-  };
-
-  const saveTracking = async () => {
-    requireAdmin();
-    const tracking = {
-      kitOutbound: trackingDraft.kitOutbound || null,
-      kitReturn: trackingDraft.kitReturn || null,
-      productOutbound: trackingDraft.productOutbound || null
-    };
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), { tracking, updatedAt: serverTimestamp() });
-    await updateDoc(doc(db, 'publicTracking', token), { tracking, updatedAt: serverTimestamp() });
-    await manualRefresh();
-  };
-
-  const setPaid = async (paid) => {
-    requireAdmin();
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      paid,
-      status: paid ? 'paid_complete' : (orderDoc?.status || trackDoc.status),
-      updatedAt: serverTimestamp()
-    });
-    await updateDoc(doc(db, 'publicTracking', token), {
-      paid,
-      status: paid ? 'paid_complete' : trackDoc.status,
-      updatedAt: serverTimestamp()
-    });
-    await manualRefresh();
-  };
-
-  const sendMessage = async (sender) => {
-    if (!trackDoc?.orderId) return;
-    if (!messageText.trim()) return;
-
-    const msg = { sender, text: messageText.trim(), at: nowISO() };
-
-    const newOrderMessages = [ ...(orderDoc?.messages || trackDoc?.messages || []), msg ];
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      messages: newOrderMessages,
-      updatedAt: serverTimestamp()
-    });
-    await updateDoc(doc(db, 'publicTracking', token), {
-      messages: newOrderMessages,
-      updatedAt: serverTimestamp()
-    });
-
-    setMessageText('');
-    await manualRefresh();
-  };
-
-  const uploadPhoto = async (file) => {
-    if (!trackDoc?.orderId) return;
-    if (!file) return;
-
-    setUploading(true);
+  // Vendor creates an order, customer claims it via Order ID + Claim Code
+  const createClientRecord = async () => {
+    if (!clientForm.name || !db || !isAdmin) return;
     try {
+      const newOrder = {
+        ownerUid: null,
+        claimCode: generateClaimCode(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+
+        customerName: clientForm.name,
+        customerEmail: clientForm.email || null,
+        status: 'created',
+        photos: [],
+        messages: [],
+        tracking: { kitOutbound: null, kitReturn: null, productOutbound: null },
+        address: null,
+        paid: false
+      };
+
+      const docRef = await addDoc(collection(db, 'orders'), newOrder);
+      setClientForm({ name: '', email: '' });
+      setActiveOrder({ id: docRef.id, ...newOrder });
+      setView('order_detail');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const claimOrder = async () => {
+    if (!db || !user) return;
+    const orderId = claimForm.orderId.trim();
+    const code = claimForm.code.trim().toUpperCase();
+    if (!orderId || !code) return;
+
+    try {
+      // Claim without reading first. Rules validate claimCode + ownerUid.
+      await updateDoc(doc(db, 'orders', orderId), {
+        ownerUid: user.uid,
+        claimCode: code,
+        claimedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      setClaimForm({ orderId: '', code: '' });
+    } catch (e) {
+      console.error(e);
+      setAuthError(e?.message || 'Unable to claim order');
+    }
+  };
+
+  const sendNote = async () => {
+    if (!newMessage.trim() || !db || !activeOrder) return;
+    const msg = {
+      text: newMessage,
+      sender: activeRole === 'vendor' ? 'vendor' : 'customer',
+      timestamp: new Date().toISOString()
+    };
+    try {
+      await updateDoc(doc(db, 'orders', activeOrder.id), {
+        messages: arrayUnion(msg),
+        updatedAt: serverTimestamp()
+      });
+      setNewMessage('');
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handlePhotoUpload = async (e) => {
+    if (!db || !storage || !activeOrder || !user) return;
+    try {
+      setIsUploading(true);
+
+      const file = e.target.files?.[0];
+      if (!file) return;
+
       const { blob } = await compressImageToBlob(file);
       const safeName = file.name.replace(/[^a-z0-9._-]/gi, '_');
-      const path = `orders/${trackDoc.orderId}/${Date.now()}_${safeName}.jpg`;
+      const path = `orders/${user.uid}/${activeOrder.id}/${Date.now()}_${safeName}.jpg`;
       const storageRef = ref(storage, path);
 
       await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
       const url = await getDownloadURL(storageRef);
 
-      const photo = {
+      const photoData = {
         url,
         storagePath: path,
-        uploadedAt: nowISO(),
-        uploadedBy: activeRole === 'vendor' ? 'vendor' : 'customer',
-        review: { status: 'pending', note: '', reviewedAt: null }
+        uploadedBy: activeRole,
+        timestamp: new Date().toISOString(),
+        approved: false
       };
 
-      const updatedPhotos = [ ...(orderDoc?.photos || trackDoc?.photos || []), photo ];
-
-      // bump status to photos_submitted if needed
-      const cur = orderDoc?.status || trackDoc.status;
-      const nextStatus = statusIndex(cur) >= statusIndex('photos_submitted') ? cur : 'photos_submitted';
-
-      await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-        photos: updatedPhotos,
-        status: nextStatus,
+      await updateDoc(doc(db, 'orders', activeOrder.id), {
+        photos: arrayUnion(photoData),
         updatedAt: serverTimestamp()
       });
-      await updateDoc(doc(db, 'publicTracking', token), {
-        photos: updatedPhotos,
-        status: nextStatus,
-        updatedAt: serverTimestamp()
-      });
-
-      await manualRefresh();
+    } catch (e2) {
+      console.error(e2);
     } finally {
-      setUploading(false);
+      setIsUploading(false);
+      e.target.value = '';
     }
   };
 
-  const reviewPhoto = async (idx, status, note) => {
-    requireAdmin();
-    const photos = [ ...(orderDoc?.photos || []) ];
-    if (!photos[idx]) return;
-    photos[idx] = {
-      ...photos[idx],
-      review: { status, note: note || '', reviewedAt: nowISO() }
-    };
-
-    // If all photos approved, advance to photos_reviewed; otherwise still photos_reviewed but customer sees rejected notes.
-    const nextStatus = 'photos_reviewed';
-
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), { photos, status: nextStatus, updatedAt: serverTimestamp() });
-    await updateDoc(doc(db, 'publicTracking', token), { photos, status: nextStatus, updatedAt: serverTimestamp() });
-    await manualRefresh();
-  };
-
-  /* ---------- Derived / initial draft fill ---------- */
-  useEffect(() => {
-    // when order loads, populate drafts
-    const src = orderDoc || trackDoc;
-    if (!src) return;
-
-    if (src.address) setAddressDraft({
-      line1: src.address.line1 || '',
-      line2: src.address.line2 || '',
-      city: src.address.city || '',
-      state: src.address.state || '',
-      zip: src.address.zip || '',
-      country: src.address.country || 'US'
-    });
-
-    if (src.tracking) setTrackingDraft({
-      kitOutbound: src.tracking.kitOutbound || '',
-      kitReturn: src.tracking.kitReturn || '',
-      productOutbound: src.tracking.productOutbound || ''
-    });
-
-    setPaidDraft(!!src.paid);
-  }, [orderDoc?.id, trackDoc?.id]);
-
-  /* ---------- Render ---------- */
-  const src = orderDoc || trackDoc; // what we can display
-  const shareURL = token ? `${window.location.origin}${window.location.pathname}?t=${token}` : '';
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center text-slate-600">Loading…</div>;
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-rose-50 via-white to-purple-50">
@@ -628,14 +344,14 @@ export default function App() {
             </div>
             <div>
               <div className="font-semibold text-slate-800 leading-tight">Gemmy Charmed Life</div>
-              <div className="text-xs text-slate-500">Token tracking · workflow</div>
+              <div className="text-xs text-slate-500">Order tracking + workflow</div>
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <div className="inline-flex bg-slate-100 rounded-full p-1">
               <button
-                onClick={() => { setActiveRole('customer'); setAuthError(''); }}
+                onClick={() => { setActiveRole('customer'); setView('dashboard'); setAuthError(''); }}
                 className={`px-4 py-1.5 rounded-full text-xs font-semibold transition ${
                   activeRole === 'customer' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                 }`}
@@ -644,7 +360,7 @@ export default function App() {
                 Customer
               </button>
               <button
-                onClick={() => { setActiveRole('vendor'); setAuthError(''); }}
+                onClick={() => { setActiveRole('vendor'); setView('dashboard'); setAuthError(''); }}
                 className={`px-4 py-1.5 rounded-full text-xs font-semibold transition ${
                   activeRole === 'vendor' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'
                 }`}
@@ -653,313 +369,262 @@ export default function App() {
                 Vendor
               </button>
             </div>
-
-            <Button variant="ghost" onClick={manualRefresh} disabled={!token || checksLimitHit} title="Refresh now">
-              <span className="inline-flex items-center gap-2"><RefreshCw className="w-4 h-4" />Refresh</span>
-            </Button>
-
-            {user && !user.isAnonymous && (
-              <Button variant="ghost" onClick={logout} title="Sign out">
-                <span className="inline-flex items-center gap-2"><LogOut className="w-4 h-4" />Sign out</span>
-              </Button>
-            )}
           </div>
         </div>
       </nav>
 
-      <main className="max-w-6xl mx-auto px-4 py-8 space-y-6">
-        {checksLimitHit && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
-            <div className="font-semibold">Refresh limit reached for this visit.</div>
-            <div className="text-sm mt-1">
-              To keep costs predictable, we pause updates after {activeRole === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks} checks.
-              Refresh the page later to continue.
-            </div>
-            <div className="text-xs mt-2 text-amber-800">
-              Used: {checksUsed} · Interval: {activeRole === 'vendor' ? LIMITS.vendor.intervalMs/1000 : LIMITS.customer.intervalMs/1000}s
+      <main className="max-w-6xl mx-auto px-4 py-8">
+        {view === 'dashboard' && (
+          <div className="space-y-8">
+
+            {/* Customer: Claim an order */}
+            {activeRole === 'customer' && (
+              <div className="bg-white border border-rose-100 p-8 rounded-3xl shadow-sm">
+                <h2 className="text-xl font-semibold text-slate-800">Access your order</h2>
+                <p className="text-slate-600 mt-1">
+                  Enter the <span className="font-medium">Order ID</span> and <span className="font-medium">Claim Code</span> your vendor sent you.
+                </p>
+
+                <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">Order ID</label>
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                      value={claimForm.orderId}
+                      onChange={(e) => setClaimForm({ ...claimForm, orderId: e.target.value })}
+                      placeholder="e.g. AbC123..."
+                      type="text"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">Claim Code</label>
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-rose-200"
+                      value={claimForm.code}
+                      onChange={(e) => setClaimForm({ ...claimForm, code: e.target.value.toUpperCase() })}
+                      placeholder="e.g. 8K4Z2PQM"
+                      type="text"
+                      autoComplete="off"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      onClick={claimOrder}
+                      className="w-full rounded-xl bg-rose-600 text-white px-4 py-2 hover:bg-rose-700 disabled:opacity-50"
+                      type="button"
+                      disabled={!claimForm.orderId || !claimForm.code}
+                    >
+                      Claim &amp; view order
+                    </button>
+                  </div>
+                </div>
+
+                {authError && <p className="mt-3 text-sm text-rose-600">{authError}</p>}
+              </div>
+            )}
+
+            {/* Vendor login gate */}
+            {activeRole === 'vendor' && !isAdmin && (
+              <div className="bg-white border border-purple-100 p-8 rounded-3xl shadow-sm">
+                <h2 className="text-xl font-semibold text-slate-800">Vendor sign-in required</h2>
+                <p className="text-slate-600 mt-1">
+                  Vendor access (dashboard, status updates, notes) requires a vendor account.
+                </p>
+
+                <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">Email</label>
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                      value={adminEmail}
+                      onChange={(e) => setAdminEmail(e.target.value)}
+                      type="email"
+                      autoComplete="email"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm font-medium text-slate-700">Password</label>
+                    <input
+                      className="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-200"
+                      value={adminPassword}
+                      onChange={(e) => setAdminPassword(e.target.value)}
+                      type="password"
+                      autoComplete="current-password"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      onClick={adminLogin}
+                      className="w-full rounded-xl bg-purple-600 text-white px-4 py-2 hover:bg-purple-700 disabled:opacity-50"
+                      type="button"
+                      disabled={!adminEmail || !adminPassword}
+                    >
+                      Sign in
+                    </button>
+                  </div>
+                </div>
+
+                {authError && <p className="mt-3 text-sm text-rose-600">{authError}</p>}
+              </div>
+            )}
+
+            {/* Vendor: Create New Client */}
+            {activeRole === 'vendor' && isAdmin && (
+              <div className="bg-white border border-rose-100 p-8 rounded-3xl shadow-sm">
+                <h2 className="text-xl font-semibold text-slate-800">Create new order</h2>
+                <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <input
+                    className="rounded-xl border border-slate-200 px-3 py-2"
+                    placeholder="Customer name"
+                    value={clientForm.name}
+                    onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })}
+                  />
+                  <input
+                    className="rounded-xl border border-slate-200 px-3 py-2"
+                    placeholder="Customer email (optional)"
+                    value={clientForm.email}
+                    onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })}
+                  />
+                  <button
+                    className="rounded-xl bg-rose-600 text-white px-4 py-2 hover:bg-rose-700 disabled:opacity-50"
+                    onClick={createClientRecord}
+                    disabled={!clientForm.name}
+                    type="button"
+                  >
+                    Create order
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Orders list */}
+            <div className="bg-white border border-slate-100 rounded-3xl p-6">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-slate-800">Orders</h3>
+                <div className="text-xs text-slate-500">{isAdmin ? 'Admin view' : 'Your orders'}</div>
+              </div>
+
+              <div className="mt-4 divide-y">
+                {orders.length === 0 && (
+                  <div className="py-6 text-slate-500">No orders yet.</div>
+                )}
+                {orders.map((o) => (
+                  <button
+                    key={o.id}
+                    className="w-full text-left py-4 hover:bg-slate-50 px-2 rounded-xl"
+                    onClick={() => { setActiveOrder(o); setView('order_detail'); }}
+                    type="button"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="font-medium text-slate-800">{o.customerName || 'Unnamed'}</div>
+                        <div className="text-xs text-slate-500">Order ID: {o.id}</div>
+                      </div>
+                      <div className="text-xs text-slate-600">{o.status || '—'}</div>
+                    </div>
+                    <ProgressBar currentStatus={o.status || 'created'} />
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
 
-        {/* Vendor login gate */}
-        {activeRole === 'vendor' && !isAdmin && (
-          <Card>
-            <h2 className="text-xl font-semibold text-slate-800">Vendor sign-in</h2>
-            <p className="text-slate-600 mt-1">Vendor tools require an admin account.</p>
-            <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="text-sm font-medium text-slate-700">Email</label>
-                <Input value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} type="email" />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-slate-700">Password</label>
-                <Input value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} type="password" />
-              </div>
-              <div className="flex items-end">
-                <Button onClick={adminLogin} disabled={!adminEmail || !adminPassword}>Sign in</Button>
-              </div>
-            </div>
-            {authError && <div className="mt-3 text-sm text-rose-600">{authError}</div>}
-          </Card>
-        )}
+        {view === 'order_detail' && activeOrder && (
+          <div className="space-y-6">
+            <button
+              className="text-sm text-slate-600 hover:text-slate-800"
+              onClick={() => setView('dashboard')}
+              type="button"
+            >
+              ← Back
+            </button>
 
-        {/* Vendor create */}
-        {activeRole === 'vendor' && isAdmin && (
-          <Card>
-            <div className="flex items-start justify-between gap-4 flex-wrap">
-              <div>
-                <h2 className="text-xl font-semibold text-slate-800">Create a new order</h2>
-                <p className="text-slate-600 mt-1">Generates a secure token link for customers (works across devices).</p>
-              </div>
-              {token && shareURL && (
-                <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                  <div className="text-xs uppercase tracking-wider text-slate-500 font-bold">Current share link</div>
-                  <div className="text-sm mt-2 break-all">{shareURL}</div>
-                </div>
-              )}
-            </div>
-            <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Input placeholder="Customer name" value={clientForm.name} onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })} />
-              <Input placeholder="Customer email (optional)" value={clientForm.email} onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })} />
-              <Button onClick={createOrder} disabled={!clientForm.name.trim()}>Create & open</Button>
-            </div>
-          </Card>
-        )}
-
-        {/* Customer: enter token */}
-        {activeRole === 'customer' && (
-          <Card>
-            <h2 className="text-xl font-semibold text-slate-800">Track your order</h2>
-            <p className="text-slate-600 mt-1">Paste the tracking link token you were sent, or open the link directly.</p>
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-              <Input placeholder="Tracking token" value={token} onChange={(e) => setToken(e.target.value.trim())} />
-              <Button variant="secondary" onClick={() => setURLToken(token)} disabled={!token}>Open token</Button>
-              <div className="text-sm text-slate-500 flex items-center">
-                Checks used this visit: <span className="ml-2 font-semibold">{checksUsed}</span>
-              </div>
-            </div>
-          </Card>
-        )}
-
-        {/* Main tracking view */}
-        {token && !loading && !trackDoc && (
-          <Card>
-            <div className="flex items-center gap-3">
-              <ShieldX className="w-5 h-5 text-rose-600" />
-              <div>
-                <div className="font-semibold text-slate-800">No order found for this token.</div>
-                <div className="text-sm text-slate-600">Double-check the link or ask your vendor to resend it.</div>
-              </div>
-            </div>
-          </Card>
-        )}
-
-        {trackDoc && (
-          <>
-            <Card>
+            <div className="bg-white border border-slate-100 rounded-3xl p-8">
               <div className="flex items-start justify-between gap-4 flex-wrap">
                 <div>
-                  <div className="text-xs uppercase tracking-wider text-slate-500 font-bold">Order</div>
-                  <h1 className="text-2xl font-semibold text-slate-800 mt-1">{trackDoc.customerName || 'Your order'}</h1>
-                  <div className="text-sm text-slate-500 mt-1">
-                    Status: <span className="font-semibold text-slate-800">{trackDoc.status}</span>
-                  </div>
-                  <ProgressBar currentStatus={trackDoc.status} />
+                  <h2 className="text-2xl font-semibold text-slate-800">{activeOrder.customerName}</h2>
+                  <div className="text-sm text-slate-500 mt-1">Order ID: {activeOrder.id}</div>
                 </div>
 
-                {isAdmin && shareURL && (
-                  <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 max-w-lg">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs uppercase tracking-wider text-slate-500 font-bold">Share link</div>
-                      <span className="inline-flex items-center gap-2 text-xs text-emerald-700">
-                        <ShieldCheck className="w-4 h-4" /> token-based
-                      </span>
+                {isAdmin && (
+                  <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4">
+                    <div className="text-xs text-slate-400 font-bold uppercase tracking-wider">Share</div>
+                    <div className="mt-2 space-y-2">
+                      <div className="text-xs text-slate-500">Order ID</div>
+                      <code className="bg-white px-3 py-1.5 rounded-xl text-sm font-mono inline-block">{activeOrder.id}</code>
+                      <div className="text-xs text-slate-500 mt-2">Claim Code</div>
+                      <code className="bg-white px-3 py-1.5 rounded-xl text-sm font-mono inline-block">{activeOrder.claimCode || '—'}</code>
+                      <div className="text-xs text-slate-500 mt-2">Customer uses both to claim the order.</div>
                     </div>
-                    <div className="text-sm mt-2 break-all">{shareURL}</div>
                   </div>
                 )}
               </div>
 
-              <Timeline status={trackDoc.status} />
-            </Card>
-
-            {/* Address */}
-            <Card>
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                  <h2 className="text-xl font-semibold text-slate-800">Shipping address</h2>
-                  <p className="text-slate-600 mt-1">Customer can fill this out; vendor can verify/edit.</p>
-                </div>
-                <Button onClick={saveAddress}>Save address</Button>
+              <div className="mt-6">
+                <div className="text-sm font-medium text-slate-700">Status: <span className="text-slate-900">{activeOrder.status}</span></div>
+                <ProgressBar currentStatus={activeOrder.status || 'created'} />
               </div>
 
-              <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-                <Input placeholder="Address line 1" value={addressDraft.line1} onChange={(e) => setAddressDraft({ ...addressDraft, line1: e.target.value })} />
-                <Input placeholder="Address line 2" value={addressDraft.line2} onChange={(e) => setAddressDraft({ ...addressDraft, line2: e.target.value })} />
-                <Input placeholder="City" value={addressDraft.city} onChange={(e) => setAddressDraft({ ...addressDraft, city: e.target.value })} />
-                <div className="grid grid-cols-2 gap-4">
-                  <Input placeholder="State" value={addressDraft.state} onChange={(e) => setAddressDraft({ ...addressDraft, state: e.target.value })} />
-                  <Input placeholder="ZIP" value={addressDraft.zip} onChange={(e) => setAddressDraft({ ...addressDraft, zip: e.target.value })} />
-                </div>
-              </div>
-            </Card>
-
-            {/* Vendor: tracking numbers + status controls */}
-            {isAdmin && (
-              <Card>
-                <div className="flex items-start justify-between gap-4 flex-wrap">
-                  <div>
-                    <h2 className="text-xl font-semibold text-slate-800">Operations</h2>
-                    <p className="text-slate-600 mt-1">Tracking numbers + phase transitions.</p>
+              <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5">
+                  <div className="flex items-center justify-between">
+                    <div className="font-semibold text-slate-800">Messages</div>
                   </div>
-                  <div className="flex gap-2 flex-wrap">
-                    <Button variant="secondary" onClick={() => updateStatus('kit_shipped')}>Set: kit shipped</Button>
-                    <Button variant="secondary" onClick={() => updateStatus('kit_delivered')}>Set: kit delivered</Button>
-                    <Button variant="secondary" onClick={() => updateStatus('mold_in_transit')}>Set: mold in transit</Button>
-                    <Button variant="secondary" onClick={() => updateStatus('mold_received')}>Set: mold received</Button>
-                    <Button variant="secondary" onClick={() => updateStatus('production')}>Set: production</Button>
-                    <Button variant="secondary" onClick={() => updateStatus('product_shipped')}>Set: product shipped</Button>
-                    <Button variant="secondary" onClick={() => updateStatus('product_delivered')}>Set: delivered</Button>
-                  </div>
-                </div>
-
-                <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div>
-                    <label className="text-sm font-medium text-slate-700">Kit outbound tracking #</label>
-                    <Input value={trackingDraft.kitOutbound} onChange={(e) => setTrackingDraft({ ...trackingDraft, kitOutbound: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-slate-700">Mold return tracking #</label>
-                    <Input value={trackingDraft.kitReturn} onChange={(e) => setTrackingDraft({ ...trackingDraft, kitReturn: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className="text-sm font-medium text-slate-700">Product outbound tracking #</label>
-                    <Input value={trackingDraft.productOutbound} onChange={(e) => setTrackingDraft({ ...trackingDraft, productOutbound: e.target.value })} />
-                  </div>
-                </div>
-
-                <div className="mt-4 flex items-center justify-between flex-wrap gap-3">
-                  <Button onClick={saveTracking}>Save tracking</Button>
-                  <div className="flex items-center gap-3">
-                    <label className="text-sm text-slate-700 font-medium">Paid/complete</label>
-                    <input type="checkbox" checked={paidDraft} onChange={(e) => setPaidDraft(e.target.checked)} />
-                    <Button variant="dark" onClick={() => setPaid(paidDraft)}>Save paid</Button>
-                  </div>
-                </div>
-              </Card>
-            )}
-
-            {/* Messages */}
-            <Card>
-              <h2 className="text-xl font-semibold text-slate-800">Messages</h2>
-              <div className="mt-4 space-y-3 max-h-72 overflow-auto pr-2">
-                {(trackDoc.messages || []).length === 0 && <div className="text-slate-500">No messages yet.</div>}
-                {(trackDoc.messages || []).map((m, i) => (
-                  <div key={i} className="rounded-2xl border border-slate-100 p-3">
-                    <div className="text-xs text-slate-500">{m.sender} · {m.at}</div>
-                    <div className="text-slate-800 mt-1">{m.text}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="mt-4 grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
-                <div className="md:col-span-5">
-                  <label className="text-sm font-medium text-slate-700">New message</label>
-                  <Input value={messageText} onChange={(e) => setMessageText(e.target.value)} placeholder="Type your message…" />
-                </div>
-                <Button
-                  className="md:col-span-1"
-                  onClick={() => sendMessage(isAdmin && activeRole === 'vendor' ? 'vendor' : 'customer')}
-                  disabled={!messageText.trim()}
-                >
-                  Send
-                </Button>
-              </div>
-            </Card>
-
-            {/* Photos */}
-            <Card>
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                  <h2 className="text-xl font-semibold text-slate-800">Photos</h2>
-                  <p className="text-slate-600 mt-1">Upload photos; vendor approves/rejects with notes.</p>
-                </div>
-                <div className="text-sm text-slate-500">{uploading ? 'Uploading…' : ''}</div>
-              </div>
-
-              <div className="mt-4">
-                <input
-                  type="file"
-                  accept="image/*"
-                  disabled={uploading}
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) uploadPhoto(f);
-                    e.target.value = '';
-                  }}
-                />
-              </div>
-
-              <div className="mt-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-                {(trackDoc.photos || []).length === 0 && (
-                  <div className="text-slate-500">No photos yet.</div>
-                )}
-
-                {(trackDoc.photos || []).map((p, idx) => {
-                  const review = p.review || { status: 'pending', note: '', reviewedAt: null };
-                  const badge =
-                    review.status === 'approved' ? 'bg-emerald-50 border-emerald-200 text-emerald-800' :
-                    review.status === 'rejected' ? 'bg-rose-50 border-rose-200 text-rose-800' :
-                    'bg-slate-50 border-slate-200 text-slate-700';
-
-                  return (
-                    <div key={idx} className="rounded-2xl border border-slate-100 p-4">
-                      <a href={p.url} target="_blank" rel="noreferrer">
-                        <img src={p.url} alt="upload" className="w-full h-56 object-cover rounded-xl border border-slate-200" />
-                      </a>
-
-                      <div className={`mt-3 inline-flex items-center gap-2 px-3 py-1 rounded-full border text-xs font-semibold ${badge}`}>
-                        {review.status === 'approved' && <CheckCircle className="w-4 h-4" />}
-                        {review.status === 'rejected' && <ShieldX className="w-4 h-4" />}
-                        {review.status === 'pending' && <Camera className="w-4 h-4" />}
-                        {review.status.toUpperCase()}
+                  <div className="mt-4 space-y-3 max-h-64 overflow-auto pr-2">
+                    {(activeOrder.messages || []).map((m, idx) => (
+                      <div key={idx} className="text-sm">
+                        <div className="text-xs text-slate-400">
+                          {m.sender} · {m.timestamp}
+                        </div>
+                        <div className="text-slate-800">{m.text}</div>
                       </div>
+                    ))}
+                    {(activeOrder.messages || []).length === 0 && (
+                      <div className="text-sm text-slate-500">No messages yet.</div>
+                    )}
+                  </div>
 
-                      {review.note && (
-                        <div className="mt-2 text-sm text-slate-700">
-                          <span className="font-semibold">Vendor note:</span> {review.note}
-                        </div>
-                      )}
+                  <div className="mt-4 flex gap-2">
+                    <input
+                      className="flex-1 rounded-xl border border-slate-200 px-3 py-2"
+                      value={newMessage}
+                      onChange={(e) => setNewMessage(e.target.value)}
+                      placeholder="Type a message…"
+                    />
+                    <button
+                      className="rounded-xl bg-slate-900 text-white px-4 py-2 hover:bg-slate-800"
+                      onClick={sendNote}
+                      type="button"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </div>
 
-                      {isAdmin && (
-                        <div className="mt-3 space-y-2">
-                          <label className="text-sm font-medium text-slate-700">Review note (optional)</label>
-                          <Textarea
-                            rows={2}
-                            value={photoNoteDraft[idx] ?? review.note ?? ''}
-                            onChange={(e) => setPhotoNoteDraft({ ...photoNoteDraft, [idx]: e.target.value })}
-                          />
-                          <div className="flex gap-2">
-                            <Button
-                              variant="secondary"
-                              onClick={() => reviewPhoto(idx, 'approved', photoNoteDraft[idx] ?? '')}
-                            >
-                              Approve
-                            </Button>
-                            <Button
-                              variant="secondary"
-                              onClick={() => reviewPhoto(idx, 'rejected', photoNoteDraft[idx] ?? '')}
-                            >
-                              Reject
-                            </Button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
+                <div className="bg-slate-50 border border-slate-100 rounded-2xl p-5">
+                  <div className="font-semibold text-slate-800">Photos</div>
+                  <div className="mt-4 flex items-center gap-3">
+                    <input type="file" accept="image/*" onChange={handlePhotoUpload} disabled={isUploading} />
+                    {isUploading && <div className="text-sm text-slate-500">Uploading…</div>}
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    {(activeOrder.photos || []).map((p, idx) => (
+                      <a key={idx} href={p.url} target="_blank" rel="noreferrer">
+                        <img src={p.url} alt="Upload" className="w-full h-32 object-cover rounded-xl border border-slate-200" />
+                      </a>
+                    ))}
+                    {(activeOrder.photos || []).length === 0 && (
+                      <div className="text-sm text-slate-500 col-span-2">No photos yet.</div>
+                    )}
+                  </div>
+                </div>
               </div>
-            </Card>
-          </>
+            </div>
+
+          </div>
         )}
       </main>
     </div>
