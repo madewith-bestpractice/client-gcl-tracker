@@ -23,9 +23,11 @@ import {
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
+import JSZip from 'jszip';
+
 import {
   Gem, Sparkles, Package, Truck, Box, Camera, CheckCircle, Heart, DollarSign,
-  Clipboard, ShieldCheck, ShieldX, RefreshCw, LogOut, Search, Copy
+  Clipboard, ShieldCheck, ShieldX, RefreshCw, LogOut, Search, Copy, Download, Eye
 } from 'lucide-react';
 
 /* ---------------- Firebase bootstrap ---------------- */
@@ -71,6 +73,7 @@ const statusIndex = (s) => Math.max(0, STATUS_FLOW.findIndex(x => x.id === s));
 
 const qs = () => new URLSearchParams(window.location.search);
 const getTokenFromURL = () => qs().get('t')?.trim() || '';
+const getHashFromURL = () => (window.location.hash || '').replace('#', '');
 
 const genToken = (bytes = 24) => {
   const a = new Uint8Array(bytes);
@@ -82,6 +85,7 @@ const genToken = (bytes = 24) => {
 };
 
 const nowISO = () => new Date().toISOString();
+const toMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis() : 0;
 
 const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => new Promise((resolve, reject) => {
   const img = new Image();
@@ -105,7 +109,12 @@ const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => new Promise
   reader.readAsDataURL(file);
 });
 
-const toMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis() : 0;
+const safeFilename = (s) =>
+  String(s || '')
+    .trim()
+    .replace(/[^a-z0-9._-]+/gi, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '') || 'file';
 
 /* ---------------- UI bits ---------------- */
 
@@ -224,6 +233,10 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState('all'); // all | needs_attention | status id
   const [sortMode, setSortMode] = useState('updated_desc'); // updated_desc | created_desc | name_asc
 
+  // export
+  const [exporting, setExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState({ step: '', done: 0, total: 0 });
+
   // create form
   const [clientForm, setClientForm] = useState({ name: '', email: '' });
 
@@ -248,10 +261,11 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
-  const setURLToken = (t) => {
+  const setURLToken = (t, hash) => {
     const u = new URL(window.location.href);
     if (t) u.searchParams.set('t', t);
     else u.searchParams.delete('t');
+    u.hash = hash ? `#${hash}` : '';
     window.history.pushState({}, '', u.toString());
     setToken(t);
     setAuthError('');
@@ -260,11 +274,18 @@ export default function App() {
   const shareURL = token ? `${window.location.origin}${window.location.pathname}?t=${token}` : '';
 
   const copyText = async (txt) => {
-    try {
-      await navigator.clipboard.writeText(txt);
-    } catch {
-      // fallback: do nothing (still shows the URL on screen)
-    }
+    try { await navigator.clipboard.writeText(txt); } catch { /* ignore */ }
+  };
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   };
 
   /* ---------- Auth bootstrap ---------- */
@@ -293,8 +314,7 @@ export default function App() {
     if (!isAdmin) return;
     setIndexLoading(true);
     try {
-      // newest-first by default
-      const q = query(collection(db, 'publicTracking'), orderBy('updatedAt', 'desc'), limit(300));
+      const q = query(collection(db, 'publicTracking'), orderBy('updatedAt', 'desc'), limit(500));
       const snaps = await getDocs(q);
       const items = snaps.docs.map(d => ({ token: d.id, ...d.data() }));
       setOrdersIndex(items);
@@ -311,20 +331,17 @@ export default function App() {
   }, [mode, isAdmin]);
 
   const needsAttention = (o) => {
-    // NEW badge: customer activity after vendor last saw it
     const lastBy = o.lastUpdateBy || 'vendor';
     const vendorSeen = toMillis(o.vendorLastSeenAt);
     const customerAct = toMillis(o.lastCustomerActivityAt);
     const updated = toMillis(o.updatedAt);
     if (lastBy !== 'customer') return false;
-    // if vendor never saw it, treat as attention-worthy once customer acts
     return (customerAct || updated) > vendorSeen;
   };
 
   const filteredOrders = useMemo(() => {
     let items = [...ordersIndex];
 
-    // search by customer name / email / status / orderId
     const s = searchText.trim().toLowerCase();
     if (s) {
       items = items.filter(o =>
@@ -336,14 +353,12 @@ export default function App() {
       );
     }
 
-    // filter
     if (statusFilter === 'needs_attention') {
       items = items.filter(needsAttention);
     } else if (statusFilter !== 'all') {
       items = items.filter(o => (o.status || 'created') === statusFilter);
     }
 
-    // sort
     if (sortMode === 'updated_desc') {
       items.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
     } else if (sortMode === 'created_desc') {
@@ -370,7 +385,7 @@ export default function App() {
     return { track, order };
   };
 
-  // minimal polling only on tracking view (keep your previous refresh limits if you want; this is simpler)
+  // polling on tracking view
   const pollRef = useRef(null);
   useEffect(() => {
     if (mode !== 'tracking') return;
@@ -389,6 +404,7 @@ export default function App() {
 
     tick();
     pollRef.current = setInterval(tick, 15000);
+
     return () => {
       alive = false;
       if (pollRef.current) clearInterval(pollRef.current);
@@ -444,7 +460,6 @@ export default function App() {
 
     const orderRef = await addDoc(collection(db, 'orders'), orderData);
 
-    // publicTracking is what customers use (and what vendors list/query)
     await setDoc(doc(db, 'publicTracking', t), {
       orderId: orderRef.id,
       customerName: orderData.customerName,
@@ -465,32 +480,29 @@ export default function App() {
     setClientForm({ name: '', email: '' });
 
     const full = `${window.location.origin}${window.location.pathname}?t=${t}`;
-    await copyText(full); // auto-copy on create
-    setURLToken(t);       // open it immediately
+    await copyText(full);      // copies full URL
+    setURLToken(t);            // opens it immediately
   };
 
-  /* ---------- Shared update helpers ---------- */
+  /* ---------- Vendor: seen + quick-open helpers ---------- */
+  const markVendorSeen = async (t) => {
+    if (!isAdmin || !t) return;
+    try {
+      await updateDoc(doc(db, 'publicTracking', t), { vendorLastSeenAt: serverTimestamp() });
+    } catch { /* ignore */ }
+  };
+
+  const openFromList = async (t, hash) => {
+    setURLToken(t, hash);
+    await markVendorSeen(t);
+  };
+
   const requireAdmin = () => {
     if (!isAdmin) throw new Error('Admin only');
     if (!trackDoc?.orderId) throw new Error('No order bound');
   };
 
-  const markVendorSeen = async (t) => {
-    if (!isAdmin || !t) return;
-    try {
-      await updateDoc(doc(db, 'publicTracking', t), {
-        vendorLastSeenAt: serverTimestamp()
-      });
-    } catch { /* ignore */ }
-  };
-
-  // When admin opens an order from the list, mark seen
-  const openFromList = async (t) => {
-    setURLToken(t);
-    await markVendorSeen(t);
-  };
-
-  /* ---------- Customer writes: update ONLY publicTracking ---------- */
+  /* ---------- Customer writes: update publicTracking (plus orders if admin) ---------- */
   const saveAddress = async () => {
     if (!trackDoc) return;
     const address = { ...addressDraft };
@@ -503,7 +515,6 @@ export default function App() {
       ...(isAdmin ? { vendorLastSeenAt: serverTimestamp() } : { lastCustomerActivityAt: serverTimestamp() })
     });
 
-    // vendor/admin can also sync to orders (optional) — keep it for admin correctness
     if (isAdmin && trackDoc.orderId) {
       await updateDoc(doc(db, 'orders', trackDoc.orderId), {
         address,
@@ -601,7 +612,7 @@ export default function App() {
     setUploading(true);
     try {
       const { blob } = await compressImageToBlob(file);
-      const safeName = file.name.replace(/[^a-z0-9._-]/gi, '_');
+      const safeName = safeFilename(file.name);
       const path = `orders/${trackDoc.orderId || 'unbound'}/${Date.now()}_${safeName}.jpg`;
       const storageRef = ref(storage, path);
 
@@ -688,7 +699,148 @@ export default function App() {
     });
 
     setPaidDraft(!!trackDoc.paid);
-  }, [trackDoc?.id]);
+
+    // If an admin opens a token link directly, count it as "seen"
+    if (isAdmin && token) {
+      markVendorSeen(token);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trackDoc?.id, isAdmin]);
+
+  /* ---------- Anchor scroll helper (for quick actions) ---------- */
+  useEffect(() => {
+    if (mode !== 'tracking') return;
+    const hash = getHashFromURL();
+    if (!hash) return;
+    const el = document.getElementById(hash);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [mode, token]);
+
+  /* ---------- Export all (admin-only) ---------- */
+  const exportAll = async () => {
+    if (!isAdmin) return;
+    setExporting(true);
+    setExportProgress({ step: 'Fetching orders…', done: 0, total: 0 });
+
+    try {
+      // Pull a generous batch; keep it simple for now.
+      const q = query(collection(db, 'publicTracking'), orderBy('updatedAt', 'desc'), limit(1000));
+      const snaps = await getDocs(q);
+      const orders = snaps.docs.map(d => ({ token: d.id, ...d.data() }));
+
+      // Build CSV
+      const headers = [
+        'token', 'orderId', 'customerName', 'customerEmail', 'status',
+        'createdAt', 'updatedAt',
+        'paid',
+        'kitOutbound', 'kitReturn', 'productOutbound',
+        'address_line1', 'address_line2', 'address_city', 'address_state', 'address_zip', 'address_country',
+        'photos_count', 'messages_count',
+        'lastUpdateBy', 'lastCustomerActivityAt', 'vendorLastSeenAt',
+        'customer_url'
+      ];
+
+      const fmtDate = (v) => {
+        const ms = toMillis(v);
+        if (!ms) return '';
+        return new Date(ms).toISOString();
+      };
+
+      const csvEscape = (v) => {
+        const s = (v === null || v === undefined) ? '' : String(v);
+        if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      };
+
+      const rows = orders.map(o => {
+        const addr = o.address || {};
+        const tr = o.tracking || {};
+        const url = `${window.location.origin}${window.location.pathname}?t=${o.token}`;
+        return [
+          o.token,
+          o.orderId || '',
+          o.customerName || '',
+          o.customerEmail || '',
+          o.status || '',
+          fmtDate(o.createdAt),
+          fmtDate(o.updatedAt),
+          o.paid ? 'true' : 'false',
+          tr.kitOutbound || '',
+          tr.kitReturn || '',
+          tr.productOutbound || '',
+          addr.line1 || '',
+          addr.line2 || '',
+          addr.city || '',
+          addr.state || '',
+          addr.zip || '',
+          addr.country || '',
+          Array.isArray(o.photos) ? o.photos.length : 0,
+          Array.isArray(o.messages) ? o.messages.length : 0,
+          o.lastUpdateBy || '',
+          fmtDate(o.lastCustomerActivityAt),
+          fmtDate(o.vendorLastSeenAt),
+          url
+        ].map(csvEscape).join(',');
+      });
+
+      const csv = [headers.join(','), ...rows].join('\n');
+
+      // ZIP it all
+      const zip = new JSZip();
+      zip.file('orders.csv', csv);
+      zip.file('orders.json', JSON.stringify(orders, null, 2));
+
+      // Images
+      const allPhotos = [];
+      orders.forEach(o => {
+        (o.photos || []).forEach((p, idx) => {
+          if (p?.url) {
+            allPhotos.push({
+              token: o.token,
+              orderId: o.orderId || '',
+              idx,
+              url: p.url,
+              uploadedAt: p.uploadedAt || '',
+              reviewStatus: p.review?.status || 'pending'
+            });
+          }
+        });
+      });
+
+      setExportProgress({ step: 'Downloading images…', done: 0, total: allPhotos.length });
+
+      // Fetch + add images sequentially (more reliable than huge parallel)
+      for (let i = 0; i < allPhotos.length; i++) {
+        const item = allPhotos[i];
+        setExportProgress({ step: 'Downloading images…', done: i, total: allPhotos.length });
+
+        try {
+          const res = await fetch(item.url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
+
+          // file name
+          const base = `${item.idx + 1}_${safeFilename(item.reviewStatus)}_${safeFilename(item.uploadedAt || '')}.jpg`;
+          const path = `images/${safeFilename(item.token)}/${base}`;
+
+          zip.file(path, blob);
+        } catch {
+          // if an image fails, keep export going
+          const path = `images/${safeFilename(item.token)}/FAILED_${item.idx + 1}.txt`;
+          zip.file(path, `Failed to download: ${item.url}`);
+        }
+      }
+
+      setExportProgress({ step: 'Generating ZIP…', done: allPhotos.length, total: allPhotos.length });
+      const out = await zip.generateAsync({ type: 'blob' });
+
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadBlob(out, `gemmy-export-${stamp}.zip`);
+    } finally {
+      setExporting(false);
+      setExportProgress({ step: '', done: 0, total: 0 });
+    }
+  };
 
   /* ---------------- Render ---------------- */
 
@@ -753,10 +905,37 @@ export default function App() {
             {isAdmin && (
               <>
                 <Card>
-                  <h2 className="text-xl font-semibold text-slate-800">Create a new order</h2>
-                  <p className="text-slate-600 mt-1">
-                    Creates an order + generates a full customer tracking URL (copied automatically).
-                  </p>
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <h2 className="text-xl font-semibold text-slate-800">Create a new order</h2>
+                      <p className="text-slate-600 mt-1">
+                        Creates an order + copies the full customer tracking URL.
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="secondary"
+                        onClick={exportAll}
+                        disabled={exporting || indexLoading}
+                        title="Export orders + images as a ZIP"
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <Download className="w-4 h-4" />
+                          {exporting ? 'Exporting…' : 'Export all'}
+                        </span>
+                      </Button>
+                    </div>
+                  </div>
+
+                  {exporting && (
+                    <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-4 text-sm text-slate-700">
+                      <div className="font-semibold">{exportProgress.step}</div>
+                      {exportProgress.total > 0 && (
+                        <div className="mt-1">{exportProgress.done} / {exportProgress.total}</div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
                     <Input
                       placeholder="Customer name"
@@ -837,30 +1016,35 @@ export default function App() {
                                   NEW
                                 </span>
                               )}
-                              <span className="text-xs text-slate-500">
-                                {o.status || 'created'}
-                              </span>
+                              <span className="text-xs text-slate-500">{o.status || 'created'}</span>
                             </div>
 
-                            <div className="text-xs text-slate-500 mt-1 break-all">
-                              {fullUrl}
-                            </div>
-
+                            <div className="text-xs text-slate-500 mt-1 break-all">{fullUrl}</div>
                             <div className="text-xs text-slate-400 mt-1">
                               Updated: {toMillis(o.updatedAt) ? new Date(toMillis(o.updatedAt)).toLocaleString() : '—'}
                             </div>
                           </div>
 
+                          {/* Quick actions */}
                           <div className="flex gap-2 flex-wrap">
-                            <Button
-                              variant="secondary"
-                              onClick={() => copyText(fullUrl)}
-                              title="Copy customer URL"
-                            >
+                            <Button variant="secondary" onClick={() => copyText(fullUrl)} title="Copy customer URL">
                               <span className="inline-flex items-center gap-2"><Copy className="w-4 h-4" />Copy</span>
                             </Button>
-                            <Button onClick={() => openFromList(o.token)}>
+
+                            <Button variant="secondary" onClick={() => markVendorSeen(o.token)} title="Mark as seen">
+                              <span className="inline-flex items-center gap-2"><Eye className="w-4 h-4" />Seen</span>
+                            </Button>
+
+                            <Button onClick={() => openFromList(o.token)} title="Open order">
                               Open
+                            </Button>
+
+                            <Button variant="secondary" onClick={() => openFromList(o.token, 'photos')} title="Jump to photos">
+                              Photos
+                            </Button>
+
+                            <Button variant="secondary" onClick={() => openFromList(o.token, 'messages')} title="Jump to messages">
+                              Messages
                             </Button>
                           </div>
                         </div>
@@ -899,9 +1083,7 @@ export default function App() {
                         <div className="flex items-start justify-between gap-3 flex-wrap">
                           <div>
                             <div className="text-xs uppercase tracking-wider text-slate-500 font-bold">Vendor</div>
-                            <div className="text-sm text-slate-600 mt-1">
-                              Customer URL:
-                            </div>
+                            <div className="text-sm text-slate-600 mt-1">Customer URL:</div>
                             <div className="text-sm mt-1 break-all">{shareURL}</div>
                           </div>
                           <div className="flex gap-2">
@@ -1005,6 +1187,7 @@ export default function App() {
 
                     {/* Messages */}
                     <Card>
+                      <div id="messages" className="scroll-mt-24" />
                       <h2 className="text-xl font-semibold text-slate-800">Messages</h2>
                       <div className="mt-4 space-y-3 max-h-72 overflow-auto pr-2">
                         {(trackDoc.messages || []).length === 0 && <div className="text-slate-500">No messages yet.</div>}
@@ -1028,6 +1211,7 @@ export default function App() {
 
                     {/* Photos */}
                     <Card>
+                      <div id="photos" className="scroll-mt-24" />
                       <div className="flex items-start justify-between gap-4 flex-wrap">
                         <div>
                           <h2 className="text-xl font-semibold text-slate-800">Photos</h2>
