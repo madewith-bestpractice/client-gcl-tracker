@@ -16,15 +16,16 @@ import {
   addDoc,
   collection,
   query,
-  where,
   getDocs,
-  serverTimestamp
+  serverTimestamp,
+  orderBy,
+  limit
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 import {
   Gem, Sparkles, Package, Truck, Box, Camera, CheckCircle, Heart, DollarSign,
-  Clipboard, ShieldCheck, ShieldX, RefreshCw, LogOut
+  Clipboard, ShieldCheck, ShieldX, RefreshCw, LogOut, Search, Copy
 } from 'lucide-react';
 
 /* ---------------- Firebase bootstrap ---------------- */
@@ -74,7 +75,10 @@ const getTokenFromURL = () => qs().get('t')?.trim() || '';
 const genToken = (bytes = 24) => {
   const a = new Uint8Array(bytes);
   crypto.getRandomValues(a);
-  return btoa(String.fromCharCode(...a)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  return btoa(String.fromCharCode(...a))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
 };
 
 const nowISO = () => new Date().toISOString();
@@ -91,12 +95,17 @@ const compressImageToBlob = (file, maxDim = 1600, quality = 0.82) => new Promise
     const canvas = document.createElement('canvas');
     canvas.width = w; canvas.height = h;
     canvas.getContext('2d').drawImage(img, 0, 0, w, h);
-    canvas.toBlob((blob) => blob ? resolve({ blob, width: w, height: h }) : reject(new Error('Compression failed')),
-      'image/jpeg', quality);
+    canvas.toBlob(
+      (blob) => blob ? resolve({ blob, width: w, height: h }) : reject(new Error('Compression failed')),
+      'image/jpeg',
+      quality
+    );
   };
   img.onerror = reject;
   reader.readAsDataURL(file);
 });
+
+const toMillis = (v) => (v && typeof v.toMillis === 'function') ? v.toMillis() : 0;
 
 /* ---------------- UI bits ---------------- */
 
@@ -177,7 +186,6 @@ const Timeline = ({ status }) => {
 /* ---------------- App ---------------- */
 
 export default function App() {
-  // Config missing
   if (!app || !auth || !db || !storage) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
@@ -193,26 +201,33 @@ export default function App() {
 
   // token drives routing
   const [token, setToken] = useState(getTokenFromURL());
-  const mode = token ? 'tracking' : 'vendor_portal'; // auto-routing
+  const mode = token ? 'tracking' : 'vendor_portal';
 
-  // auth + role
+  // auth + admin
   const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [loadingAuth, setLoadingAuth] = useState(true);
 
   // vendor login
   const [adminEmail, setAdminEmail] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [authError, setAuthError] = useState('');
 
-  // data
-  const [trackDoc, setTrackDoc] = useState(null); // {orderId, ...public view}
-  const [orderDoc, setOrderDoc] = useState(null); // admin-only
-  const [loading, setLoading] = useState(true);
+  // tracking doc + admin order doc
+  const [trackDoc, setTrackDoc] = useState(null);
+  const [orderDoc, setOrderDoc] = useState(null);
 
-  // vendor: create
+  // vendor portal: order list
+  const [ordersIndex, setOrdersIndex] = useState([]);
+  const [indexLoading, setIndexLoading] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all'); // all | needs_attention | status id
+  const [sortMode, setSortMode] = useState('updated_desc'); // updated_desc | created_desc | name_asc
+
+  // create form
   const [clientForm, setClientForm] = useState({ name: '', email: '' });
 
-  // shared actions
+  // shared fields
   const [messageText, setMessageText] = useState('');
   const [photoNoteDraft, setPhotoNoteDraft] = useState({});
   const [uploading, setUploading] = useState(false);
@@ -225,37 +240,6 @@ export default function App() {
     kitOutbound: '', kitReturn: '', productOutbound: ''
   });
   const [paidDraft, setPaidDraft] = useState(false);
-
-  /* ---------- Polling limits (per visit) ---------- */
-  const LIMITS = useMemo(() => ({
-    customer: { maxChecks: 240, intervalMs: 15000 }, // ~1 hour @ 15s
-    vendor: { maxChecks: 720, intervalMs: 5000 },   // ~1 hour @ 5s
-  }), []);
-
-  // Who is this viewer (for refresh budget)?
-  const viewerType = (mode === 'vendor_portal' || isAdmin) ? 'vendor' : 'customer';
-  const checksKey = viewerType === 'vendor' ? 'checks_vendor' : 'checks_customer';
-
-  const [checksUsed, setChecksUsed] = useState(() => Number(sessionStorage.getItem(checksKey) || 0));
-  const [checksLimitHit, setChecksLimitHit] = useState(false);
-
-  useEffect(() => {
-    // If viewerType changes (e.g., vendor signs in), re-load counter bucket for this visit
-    const used = Number(sessionStorage.getItem(checksKey) || 0);
-    setChecksUsed(used);
-    const lim = viewerType === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-    setChecksLimitHit(used >= lim);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [checksKey]);
-
-  const bumpCheck = () => {
-    const next = (Number(sessionStorage.getItem(checksKey) || 0) + 1);
-    sessionStorage.setItem(checksKey, String(next));
-    setChecksUsed(next);
-    const lim = viewerType === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-    if (next >= lim) setChecksLimitHit(true);
-    return next;
-  };
 
   /* ---------- URL token watcher ---------- */
   useEffect(() => {
@@ -273,37 +257,109 @@ export default function App() {
     setAuthError('');
   };
 
+  const shareURL = token ? `${window.location.origin}${window.location.pathname}?t=${token}` : '';
+
+  const copyText = async (txt) => {
+    try {
+      await navigator.clipboard.writeText(txt);
+    } catch {
+      // fallback: do nothing (still shows the URL on screen)
+    }
+  };
+
   /* ---------- Auth bootstrap ---------- */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       try {
         if (u) {
           setUser(u);
-          // check admin allowlist
           const adminSnap = await getDoc(doc(db, 'admins', u.uid));
           setIsAdmin(adminSnap.exists());
-          setLoading(false);
+          setLoadingAuth(false);
         } else {
           await signInAnonymously(auth);
         }
       } catch (e) {
         console.error(e);
         setIsAdmin(false);
-        setLoading(false);
+        setLoadingAuth(false);
       }
     });
     return () => unsub();
   }, []);
 
-  /* ---------- Data fetchers ---------- */
+  /* ---------- Vendor: load order index (publicTracking) ---------- */
+  const fetchOrdersIndex = async () => {
+    if (!isAdmin) return;
+    setIndexLoading(true);
+    try {
+      // newest-first by default
+      const q = query(collection(db, 'publicTracking'), orderBy('updatedAt', 'desc'), limit(300));
+      const snaps = await getDocs(q);
+      const items = snaps.docs.map(d => ({ token: d.id, ...d.data() }));
+      setOrdersIndex(items);
+    } finally {
+      setIndexLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (mode !== 'vendor_portal') return;
+    if (!isAdmin) return;
+    fetchOrdersIndex();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, isAdmin]);
+
+  const needsAttention = (o) => {
+    // NEW badge: customer activity after vendor last saw it
+    const lastBy = o.lastUpdateBy || 'vendor';
+    const vendorSeen = toMillis(o.vendorLastSeenAt);
+    const customerAct = toMillis(o.lastCustomerActivityAt);
+    const updated = toMillis(o.updatedAt);
+    if (lastBy !== 'customer') return false;
+    // if vendor never saw it, treat as attention-worthy once customer acts
+    return (customerAct || updated) > vendorSeen;
+  };
+
+  const filteredOrders = useMemo(() => {
+    let items = [...ordersIndex];
+
+    // search by customer name / email / status / orderId
+    const s = searchText.trim().toLowerCase();
+    if (s) {
+      items = items.filter(o =>
+        (o.customerName || '').toLowerCase().includes(s) ||
+        (o.customerEmail || '').toLowerCase().includes(s) ||
+        (o.status || '').toLowerCase().includes(s) ||
+        (o.orderId || '').toLowerCase().includes(s) ||
+        (o.token || '').toLowerCase().includes(s)
+      );
+    }
+
+    // filter
+    if (statusFilter === 'needs_attention') {
+      items = items.filter(needsAttention);
+    } else if (statusFilter !== 'all') {
+      items = items.filter(o => (o.status || 'created') === statusFilter);
+    }
+
+    // sort
+    if (sortMode === 'updated_desc') {
+      items.sort((a, b) => toMillis(b.updatedAt) - toMillis(a.updatedAt));
+    } else if (sortMode === 'created_desc') {
+      items.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+    } else if (sortMode === 'name_asc') {
+      items.sort((a, b) => String(a.customerName || '').localeCompare(String(b.customerName || '')));
+    }
+
+    return items;
+  }, [ordersIndex, searchText, statusFilter, sortMode]);
+
+  /* ---------- Tracking page fetch ---------- */
   const fetchByToken = async (t) => {
     if (!t) return { track: null, order: null };
-    bumpCheck();
-
-    const trackRef = doc(db, 'publicTracking', t);
-    const trackSnap = await getDoc(trackRef);
+    const trackSnap = await getDoc(doc(db, 'publicTracking', t));
     if (!trackSnap.exists()) return { track: null, order: null };
-
     const track = { id: trackSnap.id, ...trackSnap.data() };
 
     let order = null;
@@ -311,22 +367,19 @@ export default function App() {
       const orderSnap = await getDoc(doc(db, 'orders', track.orderId));
       if (orderSnap.exists()) order = { id: orderSnap.id, ...orderSnap.data() };
     }
-
     return { track, order };
   };
 
-  /* ---------- Polling loop (only in tracking mode) ---------- */
+  // minimal polling only on tracking view (keep your previous refresh limits if you want; this is simpler)
   const pollRef = useRef(null);
   useEffect(() => {
-    if (mode !== 'tracking') return; // no polling on vendor portal screen
-    if (checksLimitHit) return;
-
-    const { intervalMs } = viewerType === 'vendor' ? LIMITS.vendor : LIMITS.customer;
+    if (mode !== 'tracking') return;
+    let alive = true;
 
     const tick = async () => {
       try {
-        if (!token) return;
         const { track, order } = await fetchByToken(token);
+        if (!alive) return;
         setTrackDoc(track);
         setOrderDoc(order);
       } catch (e) {
@@ -335,35 +388,16 @@ export default function App() {
     };
 
     tick();
-
-    pollRef.current = setInterval(() => {
-      if (checksLimitHit) return;
-      const lim = viewerType === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-      const used = Number(sessionStorage.getItem(checksKey) || 0);
-      if (used >= lim) {
-        setChecksLimitHit(true);
-        return;
-      }
-      tick();
-    }, intervalMs);
-
+    pollRef.current = setInterval(tick, 15000);
     return () => {
+      alive = false;
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, token, viewerType, isAdmin, checksLimitHit]);
+  }, [mode, token, isAdmin]);
 
-  /* ---------- Manual refresh button ---------- */
   const manualRefresh = async () => {
-    if (mode !== 'tracking') return;
-    if (checksLimitHit) return;
-    if (!token) return;
-
-    const lim = viewerType === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks;
-    const used = Number(sessionStorage.getItem(checksKey) || 0);
-    if (used >= lim) { setChecksLimitHit(true); return; }
-
+    if (mode !== 'tracking' || !token) return;
     const { track, order } = await fetchByToken(token);
     setTrackDoc(track);
     setOrderDoc(order);
@@ -385,12 +419,9 @@ export default function App() {
     await signOut(auth);
     setUser(null);
     setIsAdmin(false);
-    setTrackDoc(null);
-    setOrderDoc(null);
-    // Do NOT clear token automatically; logging out while viewing a token link should still show customer view.
   };
 
-  /* ---------- Vendor: Create order + token + public tracking doc ---------- */
+  /* ---------- Vendor: Create order + token + full URL copy ---------- */
   const createOrder = async () => {
     if (!isAdmin) return;
     if (!clientForm.name.trim()) return;
@@ -402,35 +433,40 @@ export default function App() {
       customerName: clientForm.name.trim(),
       customerEmail: clientForm.email.trim() || null,
       status: 'created',
-
       address: null,
       tracking: { kitOutbound: null, kitReturn: null, productOutbound: null },
       paid: false,
-
       photos: [],
       messages: [],
-
       trackToken: t,
       archived: false
     };
 
     const orderRef = await addDoc(collection(db, 'orders'), orderData);
 
-    const publicRef = doc(db, 'publicTracking', t);
-    await setDoc(publicRef, {
+    // publicTracking is what customers use (and what vendors list/query)
+    await setDoc(doc(db, 'publicTracking', t), {
       orderId: orderRef.id,
       customerName: orderData.customerName,
+      customerEmail: orderData.customerEmail,
       status: orderData.status,
+      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       address: null,
       tracking: orderData.tracking,
       paid: orderData.paid,
       photos: [],
       messages: [],
+      lastUpdateBy: 'vendor',
+      lastCustomerActivityAt: null,
+      vendorLastSeenAt: serverTimestamp()
     });
 
     setClientForm({ name: '', email: '' });
-    setURLToken(t); // sends vendor directly to the order page they just created
+
+    const full = `${window.location.origin}${window.location.pathname}?t=${t}`;
+    await copyText(full); // auto-copy on create
+    setURLToken(t);       // open it immediately
   };
 
   /* ---------- Shared update helpers ---------- */
@@ -439,32 +475,56 @@ export default function App() {
     if (!trackDoc?.orderId) throw new Error('No order bound');
   };
 
-  const updateStatus = async (nextStatus) => {
-    requireAdmin();
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      status: nextStatus,
-      updatedAt: serverTimestamp()
-    });
+  const markVendorSeen = async (t) => {
+    if (!isAdmin || !t) return;
+    try {
+      await updateDoc(doc(db, 'publicTracking', t), {
+        vendorLastSeenAt: serverTimestamp()
+      });
+    } catch { /* ignore */ }
+  };
+
+  // When admin opens an order from the list, mark seen
+  const openFromList = async (t) => {
+    setURLToken(t);
+    await markVendorSeen(t);
+  };
+
+  /* ---------- Customer writes: update ONLY publicTracking ---------- */
+  const saveAddress = async () => {
+    if (!trackDoc) return;
+    const address = { ...addressDraft };
+
     await updateDoc(doc(db, 'publicTracking', token), {
-      status: nextStatus,
-      updatedAt: serverTimestamp()
+      address,
+      status: 'address_captured',
+      updatedAt: serverTimestamp(),
+      lastUpdateBy: isAdmin ? 'vendor' : 'customer',
+      ...(isAdmin ? { vendorLastSeenAt: serverTimestamp() } : { lastCustomerActivityAt: serverTimestamp() })
     });
+
+    // vendor/admin can also sync to orders (optional) — keep it for admin correctness
+    if (isAdmin && trackDoc.orderId) {
+      await updateDoc(doc(db, 'orders', trackDoc.orderId), {
+        address,
+        status: 'address_captured',
+        updatedAt: serverTimestamp()
+      });
+    }
+
     await manualRefresh();
   };
 
-  const saveAddress = async () => {
-    if (!trackDoc?.orderId) return;
-    const address = { ...addressDraft };
-
-    // Customer (token holder) can save address; vendor sees it too.
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      address,
-      status: 'address_captured',
-      updatedAt: serverTimestamp()
-    });
+  const updateStatus = async (nextStatus) => {
+    requireAdmin();
     await updateDoc(doc(db, 'publicTracking', token), {
-      address,
-      status: 'address_captured',
+      status: nextStatus,
+      updatedAt: serverTimestamp(),
+      lastUpdateBy: 'vendor',
+      vendorLastSeenAt: serverTimestamp()
+    });
+    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
+      status: nextStatus,
       updatedAt: serverTimestamp()
     });
     await manualRefresh();
@@ -477,56 +537,72 @@ export default function App() {
       kitReturn: trackingDraft.kitReturn || null,
       productOutbound: trackingDraft.productOutbound || null
     };
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), { tracking, updatedAt: serverTimestamp() });
-    await updateDoc(doc(db, 'publicTracking', token), { tracking, updatedAt: serverTimestamp() });
+
+    await updateDoc(doc(db, 'publicTracking', token), {
+      tracking,
+      updatedAt: serverTimestamp(),
+      lastUpdateBy: 'vendor',
+      vendorLastSeenAt: serverTimestamp()
+    });
+    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
+      tracking,
+      updatedAt: serverTimestamp()
+    });
     await manualRefresh();
   };
 
   const setPaid = async (paid) => {
     requireAdmin();
+    await updateDoc(doc(db, 'publicTracking', token), {
+      paid,
+      status: paid ? 'paid_complete' : (trackDoc.status || 'created'),
+      updatedAt: serverTimestamp(),
+      lastUpdateBy: 'vendor',
+      vendorLastSeenAt: serverTimestamp()
+    });
     await updateDoc(doc(db, 'orders', trackDoc.orderId), {
       paid,
       status: paid ? 'paid_complete' : (orderDoc?.status || trackDoc.status),
-      updatedAt: serverTimestamp()
-    });
-    await updateDoc(doc(db, 'publicTracking', token), {
-      paid,
-      status: paid ? 'paid_complete' : trackDoc.status,
       updatedAt: serverTimestamp()
     });
     await manualRefresh();
   };
 
   const sendMessage = async () => {
-    if (!trackDoc?.orderId) return;
+    if (!trackDoc) return;
     if (!messageText.trim()) return;
 
     const sender = isAdmin ? 'vendor' : 'customer';
     const msg = { sender, text: messageText.trim(), at: nowISO() };
+    const messages = [ ...(trackDoc.messages || []), msg ];
 
-    const newMessages = [ ...(orderDoc?.messages || trackDoc?.messages || []), msg ];
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-      messages: newMessages,
-      updatedAt: serverTimestamp()
-    });
     await updateDoc(doc(db, 'publicTracking', token), {
-      messages: newMessages,
-      updatedAt: serverTimestamp()
+      messages,
+      updatedAt: serverTimestamp(),
+      lastUpdateBy: isAdmin ? 'vendor' : 'customer',
+      ...(isAdmin ? { vendorLastSeenAt: serverTimestamp() } : { lastCustomerActivityAt: serverTimestamp() })
     });
+
+    if (isAdmin && trackDoc.orderId) {
+      await updateDoc(doc(db, 'orders', trackDoc.orderId), {
+        messages,
+        updatedAt: serverTimestamp()
+      });
+    }
 
     setMessageText('');
     await manualRefresh();
   };
 
   const uploadPhoto = async (file) => {
-    if (!trackDoc?.orderId) return;
+    if (!trackDoc) return;
     if (!file) return;
 
     setUploading(true);
     try {
       const { blob } = await compressImageToBlob(file);
       const safeName = file.name.replace(/[^a-z0-9._-]/gi, '_');
-      const path = `orders/${trackDoc.orderId}/${Date.now()}_${safeName}.jpg`;
+      const path = `orders/${trackDoc.orderId || 'unbound'}/${Date.now()}_${safeName}.jpg`;
       const storageRef = ref(storage, path);
 
       await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
@@ -540,20 +616,25 @@ export default function App() {
         review: { status: 'pending', note: '', reviewedAt: null }
       };
 
-      const updatedPhotos = [ ...(orderDoc?.photos || trackDoc?.photos || []), photo ];
-      const cur = orderDoc?.status || trackDoc.status;
+      const photos = [ ...(trackDoc.photos || []), photo ];
+      const cur = trackDoc.status || 'created';
       const nextStatus = statusIndex(cur) >= statusIndex('photos_submitted') ? cur : 'photos_submitted';
 
-      await updateDoc(doc(db, 'orders', trackDoc.orderId), {
-        photos: updatedPhotos,
-        status: nextStatus,
-        updatedAt: serverTimestamp()
-      });
       await updateDoc(doc(db, 'publicTracking', token), {
-        photos: updatedPhotos,
+        photos,
         status: nextStatus,
-        updatedAt: serverTimestamp()
+        updatedAt: serverTimestamp(),
+        lastUpdateBy: isAdmin ? 'vendor' : 'customer',
+        ...(isAdmin ? { vendorLastSeenAt: serverTimestamp() } : { lastCustomerActivityAt: serverTimestamp() })
       });
+
+      if (isAdmin && trackDoc.orderId) {
+        await updateDoc(doc(db, 'orders', trackDoc.orderId), {
+          photos,
+          status: nextStatus,
+          updatedAt: serverTimestamp()
+        });
+      }
 
       await manualRefresh();
     } finally {
@@ -563,7 +644,7 @@ export default function App() {
 
   const reviewPhoto = async (idx, status, note) => {
     requireAdmin();
-    const photos = [ ...(orderDoc?.photos || []) ];
+    const photos = [ ...(trackDoc.photos || []) ];
     if (!photos[idx]) return;
 
     photos[idx] = {
@@ -571,12 +652,14 @@ export default function App() {
       review: { status, note: note || '', reviewedAt: nowISO() }
     };
 
-    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
+    await updateDoc(doc(db, 'publicTracking', token), {
       photos,
       status: 'photos_reviewed',
-      updatedAt: serverTimestamp()
+      updatedAt: serverTimestamp(),
+      lastUpdateBy: 'vendor',
+      vendorLastSeenAt: serverTimestamp()
     });
-    await updateDoc(doc(db, 'publicTracking', token), {
+    await updateDoc(doc(db, 'orders', trackDoc.orderId), {
       photos,
       status: 'photos_reviewed',
       updatedAt: serverTimestamp()
@@ -587,29 +670,27 @@ export default function App() {
 
   /* ---------- Keep drafts in sync when doc loads ---------- */
   useEffect(() => {
-    const src = orderDoc || trackDoc;
-    if (!src) return;
+    if (!trackDoc) return;
 
-    if (src.address) setAddressDraft({
-      line1: src.address.line1 || '',
-      line2: src.address.line2 || '',
-      city: src.address.city || '',
-      state: src.address.state || '',
-      zip: src.address.zip || '',
-      country: src.address.country || 'US'
+    if (trackDoc.address) setAddressDraft({
+      line1: trackDoc.address.line1 || '',
+      line2: trackDoc.address.line2 || '',
+      city: trackDoc.address.city || '',
+      state: trackDoc.address.state || '',
+      zip: trackDoc.address.zip || '',
+      country: trackDoc.address.country || 'US'
     });
 
-    if (src.tracking) setTrackingDraft({
-      kitOutbound: src.tracking.kitOutbound || '',
-      kitReturn: src.tracking.kitReturn || '',
-      productOutbound: src.tracking.productOutbound || ''
+    if (trackDoc.tracking) setTrackingDraft({
+      kitOutbound: trackDoc.tracking.kitOutbound || '',
+      kitReturn: trackDoc.tracking.kitReturn || '',
+      productOutbound: trackDoc.tracking.productOutbound || ''
     });
 
-    setPaidDraft(!!src.paid);
-  }, [orderDoc?.id, trackDoc?.id]);
+    setPaidDraft(!!trackDoc.paid);
+  }, [trackDoc?.id]);
 
-  const shareURL = token ? `${window.location.origin}${window.location.pathname}?t=${token}` : '';
-  const src = orderDoc || trackDoc;
+  /* ---------------- Render ---------------- */
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-rose-50 via-white to-purple-50">
@@ -621,9 +702,7 @@ export default function App() {
             </div>
             <div>
               <div className="font-semibold text-slate-800 leading-tight">Gemmy Charmed Life</div>
-              <div className="text-xs text-slate-500">
-                {mode === 'vendor_portal' ? 'Vendor portal' : 'Order tracking'}
-              </div>
+              <div className="text-xs text-slate-500">{mode === 'vendor_portal' ? 'Vendor portal' : 'Order tracking'}</div>
             </div>
           </div>
 
@@ -631,19 +710,15 @@ export default function App() {
             <Button
               variant="ghost"
               onClick={manualRefresh}
-              disabled={mode !== 'tracking' || !token || checksLimitHit}
+              disabled={mode !== 'tracking' || !token}
               title="Refresh now"
             >
-              <span className="inline-flex items-center gap-2">
-                <RefreshCw className="w-4 h-4" />Refresh
-              </span>
+              <span className="inline-flex items-center gap-2"><RefreshCw className="w-4 h-4" />Refresh</span>
             </Button>
 
             {user && !user.isAnonymous && (
               <Button variant="ghost" onClick={logout} title="Sign out">
-                <span className="inline-flex items-center gap-2">
-                  <LogOut className="w-4 h-4" />Sign out
-                </span>
+                <span className="inline-flex items-center gap-2"><LogOut className="w-4 h-4" />Sign out</span>
               </Button>
             )}
           </div>
@@ -651,26 +726,13 @@ export default function App() {
       </nav>
 
       <main className="max-w-6xl mx-auto px-4 py-8 space-y-6">
-        {checksLimitHit && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-amber-900">
-            <div className="font-semibold">Refresh limit reached for this visit.</div>
-            <div className="text-sm mt-1">
-              To keep costs predictable, we pause updates after {viewerType === 'vendor' ? LIMITS.vendor.maxChecks : LIMITS.customer.maxChecks} checks.
-              Refresh the page later to continue.
-            </div>
-            <div className="text-xs mt-2 text-amber-800">
-              Used: {checksUsed} · Interval: {viewerType === 'vendor' ? LIMITS.vendor.intervalMs/1000 : LIMITS.customer.intervalMs/1000}s
-            </div>
-          </div>
-        )}
-
         {/* ---------------- Vendor Portal (no token) ---------------- */}
         {mode === 'vendor_portal' && (
           <>
             {!isAdmin && (
               <Card>
                 <h2 className="text-xl font-semibold text-slate-800">Vendor sign-in</h2>
-                <p className="text-slate-600 mt-1">Sign in to create orders and generate customer tracking links.</p>
+                <p className="text-slate-600 mt-1">Sign in to create orders and manage customer updates.</p>
                 <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
                     <label className="text-sm font-medium text-slate-700">Email</label>
@@ -689,34 +751,124 @@ export default function App() {
             )}
 
             {isAdmin && (
-              <Card>
-                <h2 className="text-xl font-semibold text-slate-800">Create a new order</h2>
-                <p className="text-slate-600 mt-1">This will generate a secure customer tracking link.</p>
-                <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <Input
-                    placeholder="Customer name"
-                    value={clientForm.name}
-                    onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })}
-                  />
-                  <Input
-                    placeholder="Customer email (optional)"
-                    value={clientForm.email}
-                    onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })}
-                  />
-                  <Button onClick={createOrder} disabled={!clientForm.name.trim()}>Create & open</Button>
-                </div>
+              <>
+                <Card>
+                  <h2 className="text-xl font-semibold text-slate-800">Create a new order</h2>
+                  <p className="text-slate-600 mt-1">
+                    Creates an order + generates a full customer tracking URL (copied automatically).
+                  </p>
+                  <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <Input
+                      placeholder="Customer name"
+                      value={clientForm.name}
+                      onChange={(e) => setClientForm({ ...clientForm, name: e.target.value })}
+                    />
+                    <Input
+                      placeholder="Customer email (optional)"
+                      value={clientForm.email}
+                      onChange={(e) => setClientForm({ ...clientForm, email: e.target.value })}
+                    />
+                    <Button onClick={createOrder} disabled={!clientForm.name.trim()}>Create & open</Button>
+                  </div>
+                </Card>
 
-                <div className="mt-6 text-sm text-slate-600">
-                  Already have a token link? Paste it here to open:
-                  <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <Input value={token} onChange={(e) => setToken(e.target.value.trim())} placeholder="Tracking token" />
-                    <Button variant="secondary" onClick={() => setURLToken(token)} disabled={!token}>Open token</Button>
-                    <div className="text-xs text-slate-500 flex items-center">
-                      (This takes you to the order tracking page.)
+                <Card>
+                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                    <div>
+                      <h2 className="text-xl font-semibold text-slate-800">Orders</h2>
+                      <p className="text-slate-600 mt-1">Newest updates appear at the top by default.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button variant="secondary" onClick={fetchOrdersIndex} disabled={indexLoading}>
+                        {indexLoading ? 'Refreshing…' : 'Refresh list'}
+                      </Button>
                     </div>
                   </div>
-                </div>
-              </Card>
+
+                  <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="relative">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                      <Input
+                        className="pl-9"
+                        placeholder="Search (name, email, status, orderId)…"
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                      />
+                    </div>
+
+                    <select
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value)}
+                    >
+                      <option value="all">All statuses</option>
+                      <option value="needs_attention">Needs attention (NEW)</option>
+                      {STATUS_FLOW.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                    </select>
+
+                    <select
+                      className="w-full rounded-xl border border-slate-200 px-3 py-2"
+                      value={sortMode}
+                      onChange={(e) => setSortMode(e.target.value)}
+                    >
+                      <option value="updated_desc">Sort: newest update</option>
+                      <option value="created_desc">Sort: newest created</option>
+                      <option value="name_asc">Sort: name A→Z</option>
+                    </select>
+                  </div>
+
+                  <div className="mt-5 divide-y">
+                    {filteredOrders.length === 0 && (
+                      <div className="py-6 text-slate-500">No matching orders.</div>
+                    )}
+
+                    {filteredOrders.map((o) => {
+                      const fullUrl = `${window.location.origin}${window.location.pathname}?t=${o.token}`;
+                      const isNew = needsAttention(o);
+                      return (
+                        <div key={o.token} className="py-4 flex items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <div className="font-semibold text-slate-800 truncate">
+                                {o.customerName || 'Unnamed'}
+                              </div>
+                              {isNew && (
+                                <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 text-rose-700 text-xs font-bold px-2 py-0.5">
+                                  NEW
+                                </span>
+                              )}
+                              <span className="text-xs text-slate-500">
+                                {o.status || 'created'}
+                              </span>
+                            </div>
+
+                            <div className="text-xs text-slate-500 mt-1 break-all">
+                              {fullUrl}
+                            </div>
+
+                            <div className="text-xs text-slate-400 mt-1">
+                              Updated: {toMillis(o.updatedAt) ? new Date(toMillis(o.updatedAt)).toLocaleString() : '—'}
+                            </div>
+                          </div>
+
+                          <div className="flex gap-2 flex-wrap">
+                            <Button
+                              variant="secondary"
+                              onClick={() => copyText(fullUrl)}
+                              title="Copy customer URL"
+                            >
+                              <span className="inline-flex items-center gap-2"><Copy className="w-4 h-4" />Copy</span>
+                            </Button>
+                            <Button onClick={() => openFromList(o.token)}>
+                              Open
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              </>
             )}
           </>
         )}
@@ -724,10 +876,8 @@ export default function App() {
         {/* ---------------- Tracking Page (token present) ---------------- */}
         {mode === 'tracking' && (
           <>
-            {loading ? (
-              <Card>
-                <div className="text-slate-600">Loading order…</div>
-              </Card>
+            {loadingAuth ? (
+              <Card><div className="text-slate-600">Loading…</div></Card>
             ) : (
               <>
                 {!trackDoc && (
@@ -736,7 +886,7 @@ export default function App() {
                       <ShieldX className="w-5 h-5 text-rose-600" />
                       <div>
                         <div className="font-semibold text-slate-800">No order found for this link.</div>
-                        <div className="text-sm text-slate-600">Double-check the link token and try again.</div>
+                        <div className="text-sm text-slate-600">Double-check the token and try again.</div>
                       </div>
                     </div>
                   </Card>
@@ -744,6 +894,28 @@ export default function App() {
 
                 {trackDoc && (
                   <>
+                    {isAdmin && (
+                      <Card>
+                        <div className="flex items-start justify-between gap-3 flex-wrap">
+                          <div>
+                            <div className="text-xs uppercase tracking-wider text-slate-500 font-bold">Vendor</div>
+                            <div className="text-sm text-slate-600 mt-1">
+                              Customer URL:
+                            </div>
+                            <div className="text-sm mt-1 break-all">{shareURL}</div>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button variant="secondary" onClick={() => copyText(shareURL)}>
+                              <span className="inline-flex items-center gap-2"><Copy className="w-4 h-4" />Copy</span>
+                            </Button>
+                            <Button variant="secondary" onClick={() => { setURLToken(''); }}>
+                              Back to portal
+                            </Button>
+                          </div>
+                        </div>
+                      </Card>
+                    )}
+
                     <Card>
                       <div className="flex items-start justify-between gap-4 flex-wrap">
                         <div>
@@ -755,15 +927,9 @@ export default function App() {
                           <ProgressBar currentStatus={trackDoc.status} />
                         </div>
 
-                        {isAdmin && shareURL && (
-                          <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4 max-w-lg">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="text-xs uppercase tracking-wider text-slate-500 font-bold">Share link</div>
-                              <span className="inline-flex items-center gap-2 text-xs text-emerald-700">
-                                <ShieldCheck className="w-4 h-4" /> token-based
-                              </span>
-                            </div>
-                            <div className="text-sm mt-2 break-all">{shareURL}</div>
+                        {isAdmin && (
+                          <div className="inline-flex items-center gap-2 text-xs text-emerald-700">
+                            <ShieldCheck className="w-4 h-4" /> admin controls enabled
                           </div>
                         )}
                       </div>
@@ -771,7 +937,7 @@ export default function App() {
                       <Timeline status={trackDoc.status} />
                     </Card>
 
-                    {/* Address (customer or vendor) */}
+                    {/* Address */}
                     <Card>
                       <div className="flex items-start justify-between gap-4 flex-wrap">
                         <div>
@@ -792,7 +958,7 @@ export default function App() {
                       </div>
                     </Card>
 
-                    {/* Operations (vendor-only) */}
+                    {/* Vendor operations */}
                     {isAdmin && (
                       <Card>
                         <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -801,13 +967,13 @@ export default function App() {
                             <p className="text-slate-600 mt-1">Tracking numbers + phase transitions.</p>
                           </div>
                           <div className="flex gap-2 flex-wrap">
-                            <Button variant="secondary" onClick={() => updateStatus('kit_shipped')}>Set: kit shipped</Button>
-                            <Button variant="secondary" onClick={() => updateStatus('kit_delivered')}>Set: kit delivered</Button>
-                            <Button variant="secondary" onClick={() => updateStatus('mold_in_transit')}>Set: mold in transit</Button>
-                            <Button variant="secondary" onClick={() => updateStatus('mold_received')}>Set: mold received</Button>
-                            <Button variant="secondary" onClick={() => updateStatus('production')}>Set: production</Button>
-                            <Button variant="secondary" onClick={() => updateStatus('product_shipped')}>Set: product shipped</Button>
-                            <Button variant="secondary" onClick={() => updateStatus('product_delivered')}>Set: delivered</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('kit_shipped')}>Kit shipped</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('kit_delivered')}>Kit delivered</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('mold_in_transit')}>Mold in transit</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('mold_received')}>Mold received</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('production')}>Production</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('product_shipped')}>Product shipped</Button>
+                            <Button variant="secondary" onClick={() => updateStatus('product_delivered')}>Delivered</Button>
                           </div>
                         </div>
 
@@ -923,16 +1089,10 @@ export default function App() {
                                     onChange={(e) => setPhotoNoteDraft({ ...photoNoteDraft, [idx]: e.target.value })}
                                   />
                                   <div className="flex gap-2">
-                                    <Button
-                                      variant="secondary"
-                                      onClick={() => reviewPhoto(idx, 'approved', photoNoteDraft[idx] ?? '')}
-                                    >
+                                    <Button variant="secondary" onClick={() => reviewPhoto(idx, 'approved', photoNoteDraft[idx] ?? '')}>
                                       Approve
                                     </Button>
-                                    <Button
-                                      variant="secondary"
-                                      onClick={() => reviewPhoto(idx, 'rejected', photoNoteDraft[idx] ?? '')}
-                                    >
+                                    <Button variant="secondary" onClick={() => reviewPhoto(idx, 'rejected', photoNoteDraft[idx] ?? '')}>
                                       Reject
                                     </Button>
                                   </div>
