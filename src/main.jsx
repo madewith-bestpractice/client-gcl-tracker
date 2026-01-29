@@ -1,7 +1,5 @@
 import React, { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { useState, useEffect, useMemo, Component } from "react";
-import { createRoot } from "react-dom/client";
 import {
   CheckCircle2,
   Plus,
