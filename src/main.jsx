@@ -22,7 +22,7 @@ const storage = {
   get(key, fallback) {
     try {
       if (typeof window === "undefined") return fallback;
-       raw = window.localStorage.getItem(key);
+      const raw = window.localStorage.getItem(key);
       return raw == null ? fallback : JSON.parse(raw);
     } catch {
       return fallback;
@@ -38,13 +38,13 @@ const storage = {
   },
 };
 
- DEFAULT_TASKS = [
+ const DEFAULT_TASKS = [
   { id: 1, text: "Review project requirements", completed: false, priority: "high" },
   { id: 2, text: "Draft initial layout", completed: true, priority: "medium" },
   { id: 3, text: "Email the team", completed: false, priority: "low" },
 ];
 
- DEFAULT_NOTES = [
+ const DEFAULT_NOTES = [
   { id: 1, title: "Meeting Notes", content: "Discuss Q3 goals and marketing strategy." },
   { id: 2, title: "Ideas", content: "Dark mode implementation for the new dashboard." },
 ];
