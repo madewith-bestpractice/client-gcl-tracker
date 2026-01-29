@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, Component } from "react";
 import { createRoot } from "react-dom/client";
+import "./index.css"; // 👈 REQUIRED
 import {
   CheckCircle2,
   Plus,
