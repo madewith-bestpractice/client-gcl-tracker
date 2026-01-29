@@ -1,9 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { cloudflare } from "@cloudflare/vite-plugin";
 
 export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    dedupe: ["react", "react-dom"],
-  },
+  plugins: [react(), cloudflare()],
 });
