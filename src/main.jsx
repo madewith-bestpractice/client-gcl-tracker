@@ -316,6 +316,7 @@ const App = () => {
 
 // Application entry point - mounts the React app to the DOM
 const rootElement = document.getElementById('root');
+
 if (rootElement) {
   const root = createRoot(rootElement);
   root.render(
