@@ -1,3 +1,5 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
 import { useState, useEffect, useMemo, Component } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -462,4 +464,17 @@ if (!rootElement) {
       <App />
     </ErrorBoundary>
   );
+}
+
+const rootElement = document.getElementById("root");
+
+if (rootElement) {
+  const root = createRoot(rootElement);
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+} else {
+  console.error('Root element "#root" not found. Check your index.html.');
 }
