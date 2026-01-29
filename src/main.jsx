@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
+import { createRoot } from 'react-dom/client';
 import { 
   CheckCircle2, 
   Plus, 
   Trash2, 
-  Calendar, 
   Clock, 
   Sun, 
   Moon, 
@@ -314,4 +314,13 @@ const App = () => {
   );
 };
 
-export default App;
+// Application entry point - mounts the React app to the DOM
+const rootElement = document.getElementById('root');
+if (rootElement) {
+  const root = createRoot(rootElement);
+  root.render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+}
