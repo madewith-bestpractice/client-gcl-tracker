@@ -4,19 +4,14 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "wrangler dev",
     "build": "vite build",
-    "preview": "vite preview"
+    "deploy": "wrangler deploy"
   },
   "dependencies": {
     "lucide-react": "^0.300.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
-  },
-  "scripts": {
-    "dev": "wrangler dev",
-    "build": "vite build",
-    "deploy": "wrangler deploy"
   },
   "devDependencies": {
     "wrangler": "^3.0.0",
