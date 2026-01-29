@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { useState, useEffect, useMemo, Component } from "react";
 import { createRoot } from "react-dom/client";
@@ -24,7 +24,7 @@ const storage = {
   get(key, fallback) {
     try {
       if (typeof window === "undefined") return fallback;
-      const raw = window.localStorage.getItem(key);
+       raw = window.localStorage.getItem(key);
       return raw == null ? fallback : JSON.parse(raw);
     } catch {
       return fallback;
@@ -40,13 +40,13 @@ const storage = {
   },
 };
 
-const DEFAULT_TASKS = [
+ DEFAULT_TASKS = [
   { id: 1, text: "Review project requirements", completed: false, priority: "high" },
   { id: 2, text: "Draft initial layout", completed: true, priority: "medium" },
   { id: 3, text: "Email the team", completed: false, priority: "low" },
 ];
 
-const DEFAULT_NOTES = [
+ DEFAULT_NOTES = [
   { id: 1, title: "Meeting Notes", content: "Discuss Q3 goals and marketing strategy." },
   { id: 2, title: "Ideas", content: "Dark mode implementation for the new dashboard." },
 ];
@@ -452,29 +452,17 @@ function App() {
   );
 }
 
+// ---- App mount (keep only ONE of these) ----
 const rootElement = document.getElementById("root");
 
 if (!rootElement) {
-  // Fail loudly but non-fatally in case the host HTML is wrong.
   console.error('Root element "#root" not found. Check your index.html.');
 } else {
-  const root = createRoot(rootElement);
-  root.render(
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  );
-}
-
-const rootElement = document.getElementById("root");
-
-if (rootElement) {
   const root = createRoot(rootElement);
   root.render(
     <React.StrictMode>
       <App />
     </React.StrictMode>
   );
-} else {
-  console.error('Root element "#root" not found. Check your index.html.');
 }
+
