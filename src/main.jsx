@@ -1,5 +1,4 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -25,6 +24,7 @@ import {
 } from 'lucide-react';
 
 // --- FIREBASE CONFIGURATION ---
+// IMPORTANT: Replace these placeholders with your actual keys from the Firebase Console.
 const firebaseConfig = {
   apiKey: "YOUR_API_KEY_HERE", 
   authDomain: "gemmy-charmed-app.firebaseapp.com",
@@ -308,11 +308,5 @@ const App = () => {
     </AuthProvider>
   );
 };
-
-// REQUIRED MOUNTING LOGIC
-const rootElement = document.getElementById('root');
-if (rootElement) {
-  createRoot(rootElement).render(<App />);
-}
 
 export default App;
