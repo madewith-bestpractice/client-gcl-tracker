@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import { 
   getAuth, 
   onAuthStateChanged, 
@@ -24,14 +24,14 @@ import {
 } from 'lucide-react';
 
 // --- FIREBASE CONFIGURATION ---
-// IMPORTANT: Replace these placeholders with your actual keys from the Firebase Console.
+// Replace placeholders with your actual keys from the Firebase Console
 const firebaseConfig = {
-  apiKey: "AIzaSyCZjBNDClX3g0bXW2uPCpGIgGw32tlgMMI", 
+  apiKey: "YOUR_API_KEY_HERE", 
   authDomain: "gemmy-charmed-app.firebaseapp.com",
   projectId: "gemmy-charmed-app",
   storageBucket: "gemmy-charmed-app.firebasestorage.app",
   messagingSenderId: "948878452999",
-  appId: "1:948878452999:web:51ce7ac345ab9c669f3da2"
+  appId: "YOUR_APP_ID_HERE"
 };
 
 // --- INITIALIZATION ---
@@ -42,11 +42,12 @@ let googleProvider;
 
 if (isConfigured) {
   try {
-    const app = initializeApp(firebaseConfig);
+    // Prevent double initialization
+    const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
     auth = getAuth(app);
     googleProvider = new GoogleAuthProvider();
   } catch (error) {
-    console.error("Firebase initialization failed:", error);
+    console.error("Firebase init failed:", error);
   }
 }
 
@@ -78,7 +79,7 @@ const AuthProvider = ({ children }) => {
 
 const useAuth = () => {
   const context = useContext(AuthContext);
-  if (!context) throw new Error("useAuth must be used within AuthProvider");
+  if (context === undefined) throw new Error("useAuth must be used within AuthProvider");
   return context;
 };
 
@@ -90,13 +91,12 @@ const ConfigurationWarning = () => (
       <AlertCircle size={48} className="text-amber-500 mx-auto mb-4" />
       <h2 className="text-xl font-bold text-white mb-2">Configuration Required</h2>
       <p className="text-slate-400 mb-6 text-sm">
-        Firebase keys are missing in <code className="bg-slate-700 px-1 rounded">src/main.jsx</code>. 
-        Please update the <code className="bg-slate-700 px-1 rounded">firebaseConfig</code> object with your actual API Key and App ID.
+        Firebase keys are missing in <code className="bg-slate-700 px-1 rounded text-pink-400">src/main.jsx</code>. 
       </p>
-      <div className="text-xs text-slate-500 bg-slate-900/50 p-3 rounded text-left font-mono">
-        1. Go to Firebase Console<br/>
-        2. Project Settings {' > '} General<br/>
-        3. Copy the "firebaseConfig" values.
+      <div className="text-xs text-slate-500 bg-slate-900/50 p-3 rounded text-left font-mono leading-relaxed">
+        1. Open Firebase Console<br/>
+        2. Project Settings {'>'} General<br/>
+        3. Copy values into the <code className="text-indigo-400">firebaseConfig</code> object.
       </div>
     </div>
   </div>
@@ -113,10 +113,10 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-fuchsia-50 flex flex-col items-center justify-center p-4 font-sans text-slate-800">
+    <div className="min-h-screen bg-fuchsia-50 flex flex-col items-center justify-center p-4 text-slate-800">
       <div className="text-center mb-12">
-        <div className="inline-flex items-center justify-center p-4 bg-gradient-to-r from-fuchsia-500 to-purple-600 rounded-2xl shadow-lg mb-6">
-          <Gem size={48} className="text-white" />
+        <div className="inline-flex items-center justify-center p-4 bg-gradient-to-r from-fuchsia-500 to-purple-600 rounded-2xl shadow-lg mb-6 text-white">
+          <Gem size={48} />
         </div>
         <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-fuchsia-600 to-purple-600 bg-clip-text text-transparent flex items-center justify-center gap-3">
           Gemmy Charmed Life <Sparkles className="text-yellow-400" />
@@ -127,7 +127,7 @@ const Login = () => {
       <div className="w-full max-w-sm bg-white/80 backdrop-blur-md border border-fuchsia-100 rounded-2xl shadow-xl p-8">
         <button
           onClick={handleLogin}
-          className="w-full py-3 px-4 bg-white border border-slate-200 hover:border-slate-300 hover:bg-slate-50 text-slate-700 font-medium rounded-xl transition-all flex items-center justify-center gap-3 shadow-sm group"
+          className="w-full py-3 px-4 bg-white border border-slate-200 hover:border-fuchsia-300 hover:bg-fuchsia-50 text-slate-700 font-medium rounded-xl transition-all flex items-center justify-center gap-3 shadow-sm group"
         >
           <img 
             src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" 
@@ -148,8 +148,8 @@ const Dashboard = () => {
   const [currentTime, setCurrentTime] = useState(new Date());
 
   const [tasks, setTasks] = useState([
-    { id: 1, text: 'Review gem inventory', completed: false, priority: 'high' },
-    { id: 2, text: 'Draft crystal layout', completed: true, priority: 'medium' },
+    { id: 1, text: 'Review gem inventory', completed: false },
+    { id: 2, text: 'Cleanse workspaces', completed: true },
   ]);
   const [newTask, setNewTask] = useState('');
 
@@ -168,14 +168,14 @@ const Dashboard = () => {
   const addTask = (e) => {
     e.preventDefault();
     if (!newTask.trim()) return;
-    setTasks([...tasks, { id: Date.now(), text: newTask, completed: false, priority: 'medium' }]);
+    setTasks([...tasks, { id: Date.now(), text: newTask, completed: false }]);
     setNewTask('');
   };
 
   const handleLogout = () => auth && signOut(auth);
 
   return (
-    <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-fuchsia-50 text-slate-800'} font-sans`}>
+    <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-fuchsia-50 text-slate-800'}`}>
       <nav className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 z-50 border-r ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-fuchsia-100'}`}>
         <div className="mb-8 p-3 rounded-2xl bg-gradient-to-r from-fuchsia-500 to-purple-600 text-white shadow-lg">
           <Gem size={24} />
@@ -204,7 +204,7 @@ const Dashboard = () => {
             <h1 className="text-3xl font-bold bg-gradient-to-r from-fuchsia-600 to-purple-600 bg-clip-text text-transparent flex items-center gap-2">
               {activeTab === 'tasks' ? 'Crystal Tasks' : 'Gem Notes'} <Sparkles size={20} className="text-yellow-400" />
             </h1>
-            <p className="text-sm text-slate-500 mt-1">Stay focused, {currentUser?.displayName?.split(' ')[0] || 'Friend'}.</p>
+            <p className="text-sm text-slate-500 mt-1">Manifesting productivity for {currentUser?.displayName?.split(' ')[0] || 'Friend'}.</p>
           </div>
           <div className={`flex items-center gap-3 px-4 py-2 rounded-full border shadow-sm ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-fuchsia-100'}`}>
             <Clock size={16} className="text-fuchsia-500" />
@@ -230,7 +230,7 @@ const Dashboard = () => {
               <div className="space-y-3">
                 {tasks.map(task => (
                   <div key={task.id} className={`flex items-center p-4 rounded-xl border transition-all ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-fuchsia-100'}`}>
-                    <span className="flex-grow">{task.text}</span>
+                    <span className={`flex-grow ${task.completed ? 'line-through text-slate-400' : ''}`}>{task.text}</span>
                     <button onClick={() => setTasks(tasks.filter(t => t.id !== task.id))} className="text-slate-400 hover:text-red-500">
                       <Trash2 size={18} />
                     </button>
@@ -296,8 +296,12 @@ const Dashboard = () => {
 // --- APP CONTENT GATEKEEPER ---
 const AppContent = () => {
   if (!isConfigured) return <ConfigurationWarning />;
-  const { currentUser } = useAuth();
-  return currentUser ? <Dashboard /> : <Login />;
+  const authContext = useAuth();
+  
+  // Guard for initialization
+  if (!authContext) return null;
+
+  return authContext.currentUser ? <Dashboard /> : <Login />;
 };
 
 // --- MAIN ENTRY POINT ---
