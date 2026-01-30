@@ -26,12 +26,12 @@ import {
 // --- FIREBASE CONFIGURATION ---
 // IMPORTANT: Replace these placeholders with your actual keys from the Firebase Console.
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY_HERE", 
+  apiKey: "AIzaSyCZjBNDClX3g0bXW2uPCpGIgGw32tlgMMI", 
   authDomain: "gemmy-charmed-app.firebaseapp.com",
   projectId: "gemmy-charmed-app",
   storageBucket: "gemmy-charmed-app.firebasestorage.app",
   messagingSenderId: "948878452999",
-  appId: "YOUR_APP_ID_HERE"
+  appId: "1:948878452999:web:51ce7ac345ab9c669f3da2"
 };
 
 // --- INITIALIZATION ---
