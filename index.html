@@ -4,9 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gemmy Charmed Life | Tracking</title>
+    <!-- Tailwind CSS is essential for the fuchsia theme and layout -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      /* Ensure the root takes up the full screen */
+      #root { min-height: 100vh; }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <!-- The type="module" is correct for Vite-based projects -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
