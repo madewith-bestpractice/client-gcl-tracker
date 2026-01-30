@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
 import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
@@ -14,25 +15,23 @@ import {
   Clock, 
   Sun, 
   Moon, 
-  ListTodo,
-  StickyNote,
-  X,
-  Gem,
-  Sparkles,
-  LogOut,
-  AlertCircle
+  ListTodo, 
+  StickyNote, 
+  X, 
+  Gem, 
+  Sparkles, 
+  LogOut, 
+  AlertCircle 
 } from 'lucide-react';
 
 // --- FIREBASE CONFIGURATION ---
-// IMPORTANT: You MUST replace these placeholders with your actual keys from the Firebase Console.
-// If these are left as "YOUR_API_KEY_HERE", the app will display a configuration warning.
 const firebaseConfig = {
-  apiKey: "AIzaSyCZjBNDClX3g0bXW2uPCpGIgGw32tlgMMI", 
+  apiKey: "YOUR_API_KEY_HERE", 
   authDomain: "gemmy-charmed-app.firebaseapp.com",
   projectId: "gemmy-charmed-app",
   storageBucket: "gemmy-charmed-app.firebasestorage.app",
   messagingSenderId: "948878452999",
-  appId: "1:948878452999:web:51ce7ac345ab9c669f3da2"
+  appId: "YOUR_APP_ID_HERE"
 };
 
 // --- INITIALIZATION ---
@@ -177,7 +176,6 @@ const Dashboard = () => {
 
   return (
     <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-fuchsia-50 text-slate-800'} font-sans`}>
-      {/* Sidebar */}
       <nav className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 z-50 border-r ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-fuchsia-100'}`}>
         <div className="mb-8 p-3 rounded-2xl bg-gradient-to-r from-fuchsia-500 to-purple-600 text-white shadow-lg">
           <Gem size={24} />
@@ -310,5 +308,11 @@ const App = () => {
     </AuthProvider>
   );
 };
+
+// REQUIRED MOUNTING LOGIC
+const rootElement = document.getElementById('root');
+if (rootElement) {
+  createRoot(rootElement).render(<App />);
+}
 
 export default App;
