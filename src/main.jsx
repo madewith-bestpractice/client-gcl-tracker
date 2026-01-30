@@ -7,7 +7,6 @@ import {
   GoogleAuthProvider,
   signOut 
 } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
 import { 
   CheckCircle2, 
   Plus, 
@@ -20,37 +19,50 @@ import {
   X,
   Gem,
   Sparkles,
-  LogOut
+  LogOut,
+  AlertCircle
 } from 'lucide-react';
 
 // --- FIREBASE CONFIGURATION ---
-// IMPORTANT: Replace these placeholders with your actual settings from the Firebase Console.
+// IMPORTANT: You MUST replace these placeholders with your actual keys from the Firebase Console.
+// If these are left as "YOUR_API_KEY_HERE", the app will display a configuration warning.
 const firebaseConfig = {
-  apiKey: "AIzaSyCZjBNDClX3g0bXW2uPCpGIgGw32tlgMMI", 
+  apiKey: "YOUR_API_KEY_HERE", 
   authDomain: "gemmy-charmed-app.firebaseapp.com",
   projectId: "gemmy-charmed-app",
   storageBucket: "gemmy-charmed-app.firebasestorage.app",
   messagingSenderId: "948878452999",
-  appId: "1:948878452999:web:51ce7ac345ab9c669f3da2"
+  appId: "YOUR_APP_ID_HERE"
 };
 
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const googleProvider = new GoogleAuthProvider();
+// --- INITIALIZATION ---
+const isConfigured = firebaseConfig.apiKey !== "YOUR_API_KEY_HERE";
+
+let auth;
+let googleProvider;
+
+if (isConfigured) {
+  try {
+    const app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    googleProvider = new GoogleAuthProvider();
+  } catch (error) {
+    console.error("Firebase initialization failed:", error);
+  }
+}
 
 // --- AUTHENTICATION CONTEXT ---
 const AuthContext = createContext(null);
 
-export function useAuth() {
-  return useContext(AuthContext);
-}
-
-export function AuthProvider({ children }) {
+const AuthProvider = ({ children }) => {
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!isConfigured || !auth) {
+      setLoading(false);
+      return;
+    }
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       setLoading(false);
@@ -58,18 +70,42 @@ export function AuthProvider({ children }) {
     return () => unsubscribe();
   }, []);
 
-  const value = { currentUser };
-
   return (
-    <AuthContext.Provider value={value}>
+    <AuthContext.Provider value={{ currentUser }}>
       {!loading && children}
     </AuthContext.Provider>
   );
-}
+};
 
-// --- LOGIN COMPONENT ---
-function Login() {
+const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error("useAuth must be used within AuthProvider");
+  return context;
+};
+
+// --- COMPONENTS ---
+
+const ConfigurationWarning = () => (
+  <div className="min-h-screen bg-slate-900 flex items-center justify-center p-6 text-center">
+    <div className="max-w-md bg-slate-800 border border-amber-500/50 rounded-2xl p-8 shadow-2xl">
+      <AlertCircle size={48} className="text-amber-500 mx-auto mb-4" />
+      <h2 className="text-xl font-bold text-white mb-2">Configuration Required</h2>
+      <p className="text-slate-400 mb-6 text-sm">
+        Firebase keys are missing in <code className="bg-slate-700 px-1 rounded">src/main.jsx</code>. 
+        Please update the <code className="bg-slate-700 px-1 rounded">firebaseConfig</code> object with your actual API Key and App ID.
+      </p>
+      <div className="text-xs text-slate-500 bg-slate-900/50 p-3 rounded text-left font-mono">
+        1. Go to Firebase Console<br/>
+        2. Project Settings {' > '} General<br/>
+        3. Copy the "firebaseConfig" values.
+      </div>
+    </div>
+  </div>
+);
+
+const Login = () => {
   const handleLogin = async () => {
+    if (!auth || !googleProvider) return;
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (error) {
@@ -78,7 +114,7 @@ function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-fuchsia-50 flex flex-col items-center justify-center p-4 font-sans">
+    <div className="min-h-screen bg-fuchsia-50 flex flex-col items-center justify-center p-4 font-sans text-slate-800">
       <div className="text-center mb-12">
         <div className="inline-flex items-center justify-center p-4 bg-gradient-to-r from-fuchsia-500 to-purple-600 rounded-2xl shadow-lg mb-6">
           <Gem size={48} className="text-white" />
@@ -104,10 +140,9 @@ function Login() {
       </div>
     </div>
   );
-}
+};
 
-// --- MAIN DASHBOARD COMPONENT ---
-function Dashboard() {
+const Dashboard = () => {
   const { currentUser } = useAuth();
   const [activeTab, setActiveTab] = useState('tasks');
   const [darkMode, setDarkMode] = useState(false);
@@ -138,11 +173,10 @@ function Dashboard() {
     setNewTask('');
   };
 
-  const handleLogout = () => signOut(auth);
+  const handleLogout = () => auth && signOut(auth);
 
   return (
     <div className={`min-h-screen transition-colors duration-300 ${darkMode ? 'bg-slate-900 text-slate-100' : 'bg-fuchsia-50 text-slate-800'} font-sans`}>
-      {/* Sidebar */}
       <nav className={`fixed left-0 top-0 h-full w-20 flex flex-col items-center py-8 z-50 border-r ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-fuchsia-100'}`}>
         <div className="mb-8 p-3 rounded-2xl bg-gradient-to-r from-fuchsia-500 to-purple-600 text-white shadow-lg">
           <Gem size={24} />
@@ -165,14 +199,13 @@ function Dashboard() {
         </div>
       </nav>
 
-      {/* Main Content */}
       <main className="pl-20 min-h-screen">
         <header className="px-8 py-8 flex justify-between items-center max-w-5xl mx-auto">
           <div>
             <h1 className="text-3xl font-bold bg-gradient-to-r from-fuchsia-600 to-purple-600 bg-clip-text text-transparent flex items-center gap-2">
               {activeTab === 'tasks' ? 'Crystal Tasks' : 'Gem Notes'} <Sparkles size={20} className="text-yellow-400" />
             </h1>
-            <p className="text-sm text-slate-500 mt-1">Manifesting productivity for {currentUser?.displayName?.split(' ')[0] || 'Friend'}.</p>
+            <p className="text-sm text-slate-500 mt-1">Stay focused, {currentUser?.displayName?.split(' ')[0] || 'Friend'}.</p>
           </div>
           <div className={`flex items-center gap-3 px-4 py-2 rounded-full border shadow-sm ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-fuchsia-100'}`}>
             <Clock size={16} className="text-fuchsia-500" />
@@ -208,10 +241,7 @@ function Dashboard() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <button 
-                onClick={() => setIsAddingNote(true)} 
-                className={`p-6 h-48 rounded-2xl border-2 border-dashed flex flex-col items-center justify-center transition-all ${darkMode ? 'border-slate-700 text-slate-500 hover:bg-slate-800' : 'border-fuchsia-200 text-fuchsia-300 hover:bg-fuchsia-50'}`}
-              >
+              <button onClick={() => setIsAddingNote(true)} className={`p-6 h-48 rounded-2xl border-2 border-dashed flex flex-col items-center justify-center transition-all ${darkMode ? 'border-slate-700 text-slate-500 hover:bg-slate-800' : 'border-fuchsia-200 text-fuchsia-300 hover:bg-fuchsia-50'}`}>
                 <Plus size={40} className="mb-2" />
                 <span className="font-medium">New Gem Note</span>
               </button>
@@ -226,7 +256,6 @@ function Dashboard() {
         </div>
       </main>
 
-      {/* Note Modal */}
       {isAddingNote && (
         <div className="fixed inset-0 bg-slate-900/20 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className={`w-full max-w-md rounded-2xl shadow-2xl p-6 ${darkMode ? 'bg-slate-900 border border-slate-700' : 'bg-white border-2 border-fuchsia-100'}`}>
@@ -263,23 +292,22 @@ function Dashboard() {
       )}
     </div>
   );
-}
+};
 
-// --- ENTRY POINT ---
-function AppContent() {
-  const authContext = useAuth();
-  
-  // Guard against undefined context during initialization
-  if (!authContext) return null;
-
-  const { currentUser } = authContext;
+// --- APP CONTENT GATEKEEPER ---
+const AppContent = () => {
+  if (!isConfigured) return <ConfigurationWarning />;
+  const { currentUser } = useAuth();
   return currentUser ? <Dashboard /> : <Login />;
-}
+};
 
-export default function App() {
+// --- MAIN ENTRY POINT ---
+const App = () => {
   return (
     <AuthProvider>
       <AppContent />
     </AuthProvider>
   );
-}
+};
+
+export default App;
